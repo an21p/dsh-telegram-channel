@@ -1,8 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 export declare const name = "dsh-telegram-channel";
-/** agents: followup; apiProxy is optional and resolved at runtime via ctx.get;
- *  when absent, catalog helpers degrade to the live-agents view. */
+/** agents: followup; apiProxy and userQuestions are optional runtime services. */
 export declare const inject: string[];
 export interface TelegramChannelConfig {
     token?: string;
@@ -10,6 +9,8 @@ export interface TelegramChannelConfig {
     allowAllUsers?: boolean;
     maxMessageLength?: number;
     pollingTimeoutSec?: number;
+    /** 'rich' = Telegram native Rich Messages (needs a recent client);
+     *  anything else (default) = HTML compatibility mode that renders on all clients. */
     rendering?: string;
 }
 export declare const Config: Schema<TelegramChannelConfig>;

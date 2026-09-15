@@ -3,8 +3,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { TelegramBridge } from './bridge.js'
 
 export const name = 'dsh-telegram-channel'
-/** agents: followup; apiProxy is optional and resolved at runtime via ctx.get;
- *  when absent, catalog helpers degrade to the live-agents view. */
+/** agents: followup; apiProxy and userQuestions are optional runtime services. */
 export const inject = ['agents']
 
 export interface TelegramChannelConfig {
@@ -13,6 +12,8 @@ export interface TelegramChannelConfig {
   allowAllUsers?: boolean
   maxMessageLength?: number
   pollingTimeoutSec?: number
+  /** 'rich' = Telegram native Rich Messages (needs a recent client);
+   *  anything else (default) = HTML compatibility mode that renders on all clients. */
   rendering?: string
 }
 

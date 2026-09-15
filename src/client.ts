@@ -14,12 +14,41 @@ export interface TelegramChat {
   username?: string
 }
 
+export interface TelegramPhotoSize {
+  file_id: string
+  file_unique_id: string
+  width: number
+  height: number
+  file_size?: number
+}
+
+export interface TelegramDocument {
+  file_id: string
+  file_unique_id: string
+  file_name?: string
+  mime_type?: string
+  file_size?: number
+}
+
 export interface TelegramMessage {
   message_id: number
   date: number
   chat: TelegramChat
   from?: TelegramUser
   text?: string
+  /** Media caption (photos/documents); TG puts it here, not in `text`. */
+  caption?: string
+  photo?: TelegramPhotoSize[]
+  document?: TelegramDocument
+  /** Album grouping id: several photo updates share one media_group_id. */
+  media_group_id?: string
+}
+
+export interface TelegramFile {
+  file_id: string
+  file_unique_id: string
+  file_size?: number
+  file_path?: string
 }
 
 export interface TelegramCallbackQuery {
@@ -73,6 +102,10 @@ export interface TelegramClientLike {
   sendChatAction(chatId: number, action: string): Promise<boolean>
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>
   setMyCommands(commands: TelegramBotCommand[]): Promise<boolean>
+  /** Resolve a file_id to a file_path (downloadable URL suffix). */
+  getFile(fileId: string): Promise<TelegramFile>
+  /** Download file bytes from the Bot API file endpoint (GET, proxy-aware). */
+  downloadFile(filePath: string): Promise<Uint8Array>
 }
 
 function resolveProxyUrl(): string | undefined {
@@ -196,5 +229,23 @@ export class TelegramClient implements TelegramClientLike {
 
   async setMyCommands(commands: TelegramBotCommand[]): Promise<boolean> {
     return this.call<boolean>('setMyCommands', { commands })
+  }
+
+  async getFile(fileId: string): Promise<TelegramFile> {
+    return this.call<TelegramFile>('getFile', { file_id: fileId })
+  }
+
+  async downloadFile(filePath: string): Promise<Uint8Array> {
+    const url = `${this.baseUrl}/file/bot${this.token}/${filePath}`
+    try {
+      const response = await this.fetchImpl(url)
+      if (!response.ok) {
+        throw new Error(`Telegram file download failed: HTTP ${String(response.status)}`)
+      }
+      return new Uint8Array(await response.arrayBuffer())
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(this.redact(message))
+    }
   }
 }

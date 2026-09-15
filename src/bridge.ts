@@ -1,9 +1,15 @@
+import { Buffer } from 'node:buffer'
+import { randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import type { ContentBlock, TextBlock } from '@deepseek-ai/dsh-llm/types'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { isAuthorized } from './auth.js'
+import { resolveApiProxy } from './apiproxy.js'
 import {
   catalogFromLiveAgents,
   loadCatalog,
@@ -18,19 +24,26 @@ import {
   TelegramClient,
   type InlineKeyboardMarkup,
   type TelegramClientLike,
+  type TelegramMessage,
   type TelegramUpdate,
 } from './client.js'
 import { MSG, LAST_CB, parseCommand } from './commands.js'
 import { markdownToHtml, splitMessage } from './format.js'
 import { splitRichMarkdown } from './rich-format.js'
 import { formatLastTurn, loadLastTurn } from './history.js'
-import { describeAgent, displayLabel } from './label.js'
+import { describeAgent, displayLabel, workspaceName } from './label.js'
 import {
   formatModel,
   loadSessionModels,
   selectSessionModel,
   type ModelOption,
 } from './models.js'
+import {
+  formatStatusText,
+  type StatusInfo,
+  type StatusRuntime,
+  type StatusWorkspace,
+} from './status.js'
 
 export interface TelegramBridgeOptions {
   token: string
@@ -60,6 +73,118 @@ interface PickerState {
 
 interface SessionLike {
   id: ReturnType<typeof SessionId>
+}
+
+/** ── Stability & interactivity additions: local types (host seam shapes mirrored structurally) ── */
+
+interface TgQuestionItem {
+  id?: string
+  question?: string
+  options?: Array<{ label: string; description?: string }>
+  multiSelect?: boolean
+}
+
+interface TgAnswerHandle {
+  resolve: (answer: unknown) => void
+  reject: (err: Error) => void
+  answered: boolean
+}
+
+/** chatId → pending ask_user_question mirrored to Telegram. */
+interface TgPendingAsk {
+  req: unknown
+  sessionId: string
+  questions: TgQuestionItem[]
+  ask: TgAnswerHandle
+  at: number
+}
+
+/** chatId → pending approval request mirrored to Telegram. */
+interface TgPendingApproval {
+  toolName: string
+  ask: TgAnswerHandle
+}
+
+/** Structural view of the user-questions seam (types live in the host's dsh-user-questions package). */
+interface UserQuestionsServiceLike {
+  provider?: {
+    ask: (request: unknown) => Promise<unknown>
+    __tgHooked?: boolean
+    __tgRealAsk?: (request: unknown) => Promise<unknown>
+  }
+}
+
+/** Loose view of the approval request passed through the `approval/request` waterfall hook. */
+interface ApprovalRequestLike {
+  agent?: Agent
+  toolName?: string
+  reason?: string
+  signal?: AbortSignal
+}
+
+/** ── /status 与 /compact 需要的宿主缝隙（结构镜像，避免引入额外依赖）── */
+
+/** 会话投影注册表（只读使用 snapshot）：对齐 Web 底部统计条的数据源。 */
+interface ProjectionRegistryLike {
+  snapshot?: (session: unknown) => { asOfSeq: number; values: Record<string, unknown> } | undefined
+}
+
+/**
+ * 命令运行时（结构镜像 ctx.commands.execute）。
+ *
+ * /compact 不在插件可见作用域内直接提供 compaction 服务（compaction-basic 挂载在
+ * 隔离作用域，ctx.get 取不到），但宿主命令运行时可见，且 command-compact 已把
+ * /compact 注册进该运行时的按 agent 作用层 —— Web 端正是用 execute() 派发它的。
+ * TG 端复用同一条通道：语义、busy/错误映射、命令生命周期日志与 Web 完全一致。
+ */
+interface CommandsRuntimeLike {
+  find?: (agent: unknown, name: string) => unknown
+  execute?: (
+    agent: unknown,
+    line: string,
+    images: readonly unknown[],
+    signal: AbortSignal,
+  ) => Promise<{ commandId: string; result: { kind: string; text?: string } } | undefined>
+}
+
+/** command-compact 的 CommandResult.kind 值。 */
+type CompactCommandKind = 'success' | 'error'
+
+/** Wire prompt content part (mirrors host PromptContentPart): text or base64 image. */
+type WireContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mediaType: string; data: string; name?: string }
+
+/** Host-admitted raster media types (@deepseek-ai/dsh-attachment). */
+const IMAGE_MEDIA_TYPES: readonly string[] = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+
+/** Album debounce window: TG emits each photo of an album as its own update. */
+const MEDIA_GROUP_WINDOW_MS = 1200
+
+/**
+ * 把 command-compact 返回的英文结果翻译成 TG 中文回复。
+ * 文案以宿主 @deepseek-ai/dsh-command-compact 的固定输出为准；无法识别时返回
+ * undefined，由调用方回退为「压缩失败 + 原文详情」。
+ */
+function translateCompactResult(result: { kind: string; text?: string } | undefined): string | undefined {
+  const kind = result?.kind as CompactCommandKind | undefined
+  const text = result?.text ?? ''
+  if (kind === 'success') {
+    const m = /Compacted (\d+) history items \(~(\d+) tokens\)/.exec(text)
+    if (m) return MSG.COMPACT_DONE(Number(m[1]), Number(m[2]))
+    if (/No compactable history yet/.test(text)) return MSG.COMPACT_NOTHING
+    return undefined
+  }
+  if (kind === 'error') {
+    if (/active compaction|not idle/.test(text)) return MSG.COMPACT_BUSY
+    if (/^Compaction cancelled/.test(text)) return MSG.COMPACT_CANCELLED
+    if (/history selected for compaction changed/.test(text)) return MSG.COMPACT_CHANGED
+    if (/could not produce a useful summary/.test(text)) return MSG.COMPACT_SUMMARY_FAILED
+    if (/did not finish cleanly/.test(text)) return MSG.COMPACT_COMMIT_FAILED
+    if (/could not be saved/.test(text)) return MSG.COMPACT_PERSIST_FAILED
+    return undefined
+  }
+  return undefined
 }
 
 const WS_CB = 'ws:'
@@ -99,7 +224,12 @@ export class TelegramBridge {
   private readonly client: TelegramClientLike
   private readonly sleep: (ms: number) => Promise<void>
   private readonly maxMessageLength: number
+  /** Global rendering mode: follows config; flipped to 'html' permanently when the
+   *  Rich Message API itself is unavailable (a server-wide fact, not per-chat). */
   private renderingMode: 'rich' | 'html'
+  /** Per-chat rendering override (persisted): rich messages need a recent Telegram
+   *  client — old ones (e.g. 10.x) cannot render them and show “unsupported”. */
+  private readonly renderPrefs = new Map<string, 'rich' | 'html'>()
 
   private readonly bindings = new Map<string, Binding>()
   private readonly pickers = new Map<string, PickerState>()
@@ -111,6 +241,30 @@ export class TelegramBridge {
   private pollAbort: AbortController | undefined
   private disposeSessionListener: (() => void) | undefined
 
+  // ── Stability & interactivity additions ──
+  /** sessionIds mid-turn (busy feedback, /stop state) */
+  private readonly busySessions = new Set<string>()
+  /** chatId → typing heartbeat interval handle */
+  private readonly heartbeats = new Map<string, ReturnType<typeof setInterval>>()
+  /** chatId → serialized notice chain (prevents 429 storms) */
+  private readonly noticeQueue = new Map<string, Promise<unknown>>()
+  private readonly pendingAsks = new Map<string, TgPendingAsk>()
+  private hookTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly pendingApprovalsTG = new Map<string, TgPendingApproval>()
+  private disposeApprovalHook: (() => void) | undefined
+  /** sessionId → thinking indicator state (one notice per reasoning phase) */
+  private readonly thinkingSessions = new Map<string, boolean>()
+  /** callId → tool name (tool/result failure notices) */
+  private readonly callNames = new Map<string, string>()
+  /** sessionId → latest todo snapshot (/mission) */
+  private readonly lastTodos = new Map<string, Array<{ content?: string; status?: string }>>()
+  /** sessionId → in-flight manual compaction (dedup /compact) */
+  private readonly compacting = new Set<string>()
+  /** sessionId → compaction abort controller (cancelled on bridge stop) */
+  private readonly compactAborts = new Map<string, AbortController>()
+  /** Album accumulation: chatId:media_group_id → parts buffered into one prompt. */
+  private readonly mediaGroups = new Map<string, { chatId: number; parts: WireContentPart[]; timer?: ReturnType<typeof setTimeout> }>()
+
   constructor(ctx: Context, options: TelegramBridgeOptions) {
     this.ctx = ctx
     this.token = options.token
@@ -121,8 +275,14 @@ export class TelegramBridge {
     })
     this.sleep = options.sleep ?? defaultSleep
     this.maxMessageLength = options.maxMessageLength ?? 4096
-    // HTML is the compatibility default; opt into Rich Messages explicitly.
+    // Compat-first default: only an explicit `rendering: 'rich'` opts into rich
+    // messages, because old Telegram clients (10.x) cannot render them at all.
     this.renderingMode = options.rendering === 'rich' ? 'rich' : 'html'
+  }
+
+  /** Effective rendering mode for a chat: per-chat override, else the global mode. */
+  private modeFor(chatId: number): 'rich' | 'html' {
+    return this.renderPrefs.get(String(chatId)) ?? this.renderingMode
   }
 
   start(): void {
@@ -132,13 +292,27 @@ export class TelegramBridge {
         this.ctx.logger.error(this.redact(err))
       })
     })
+    // Restore persisted bindings (survive hot reload / restart) and install
+    // the TG answering hooks (ask_user dual-path + approval dual-path).
+    this.loadBindings()
+    this.hookUserQuestions()
+    this.disposeApprovalHook?.()
+    this.disposeApprovalHook = (this.ctx as unknown as {
+      on: (event: string, handler: (req: ApprovalRequestLike, next: () => Promise<string>) => Promise<string>) => () => void
+    }).on('approval/request', (req, next) => this.onApprovalRequest(req, next))
     void this.client.setMyCommands([
       { command: 'start', description: '欢迎与用法' },
       { command: 'sessions', description: '按工作区列出并附着会话' },
       { command: 'last', description: '查看上次问答（续接上下文）' },
       { command: 'model', description: '切换当前绑定会话的模型' },
-      { command: 'status', description: '查看当前绑定' },
+      { command: 'status', description: '会话状态：模型/上下文/统计（首token/速率/tokens）' },
+      { command: 'compact', description: '压缩当前会话历史（缩短上下文，空闲时执行）' },
+      { command: 'rich', description: '渲染：on 富文本 / off HTML 兼容（本聊天，需新版客户端）' },
       { command: 'unbind', description: '断开手机绑定（不关闭本机会话）' },
+      { command: 'stop', description: '中止当前正在运行的任务' },
+      { command: 'mission', description: '查看任务清单与完成情况' },
+      { command: 'new', description: '在当前工作区新开对话并附着' },
+      { command: 'cancel', description: '关闭 TG 端作答/审批（Web 端仍可答）' },
       { command: 'help', description: '显示帮助' },
     ]).then(() => {
       this.ctx.logger.info('dsh-telegram-channel: bot commands registered')
@@ -161,8 +335,28 @@ export class TelegramBridge {
     this.disposeSessionListener = undefined
     // Never dispose host agents — only clear remote bindings.
     this.bindings.clear()
+    this.renderPrefs.clear()
     this.pickers.clear()
     this.pendingModels.clear()
+    this.stopAllHeartbeats()
+    this.busySessions.clear()
+    this.noticeQueue.clear()
+    this.pendingAsks.clear()
+    this.pendingApprovalsTG.clear()
+    this.thinkingSessions.clear()
+    this.callNames.clear()
+    this.lastTodos.clear()
+    for (const controller of this.compactAborts.values()) controller.abort()
+    this.compactAborts.clear()
+    this.compacting.clear()
+    for (const group of this.mediaGroups.values()) clearTimeout(group.timer)
+    this.mediaGroups.clear()
+    if (this.hookTimer) {
+      clearTimeout(this.hookTimer)
+      this.hookTimer = undefined
+    }
+    this.disposeApprovalHook?.()
+    this.disposeApprovalHook = undefined
     if (this.pollPromise) {
       await this.pollPromise.catch(() => {})
       this.pollPromise = undefined
@@ -175,13 +369,32 @@ export class TelegramBridge {
       return
     }
     const message = update.message
-    if (!message?.text) return
+    if (!message) return
 
     const chatId = message.chat.id
     const userId = message.from?.id
 
     if (!isAuthorized({ allowAllUsers: this.allowAllUsers, allowedUserIds: this.allowedUserIds, userId })) {
       await this.client.sendMessage(chatId, MSG.DENIED)
+      return
+    }
+
+    // Media messages: photos / image documents (optionally with a caption) are
+    // admitted into the bound session; other media get an explicit notice.
+    // A caption is treated as accompanying text — never parsed as a command.
+    const mediaParts = await this.collectMediaParts(chatId, message)
+    if (mediaParts !== undefined) {
+      if (mediaParts.length > 0) {
+        if (message.media_group_id) this.accumulateMediaGroup(chatId, message.media_group_id, mediaParts)
+        else await this.sendImageFollowup(chatId, mediaParts)
+      }
+      return
+    }
+
+    // Non-text messages without recognized media: tell the (authorized) user
+    // instead of dropping silently.
+    if (!message.text) {
+      await this.enqueueNotice(chatId, MSG.MEDIA_UNSUPPORTED)
       return
     }
 
@@ -205,17 +418,57 @@ export class TelegramBridge {
       case 'status':
         await this.sendStatus(chatId)
         return
+      case 'compact':
+        await this.requestCompact(chatId)
+        return
+      case 'rich':
+        await this.handleRichCommand(chatId, parsed.arg)
+        return
       case 'unbind':
         this.bindings.delete(String(chatId))
         this.pickers.delete(String(chatId))
+        this.pendingAsks.delete(String(chatId))
+        this.saveBindings()
         await this.client.sendMessage(chatId, MSG.UNBOUND)
         return
+      case 'stop':
+        await this.stopBound(chatId)
+        return
+      case 'mission':
+        await this.sendMission(chatId)
+        return
+      case 'new':
+        await this.newSessionHere(chatId)
+        return
+      case 'cancel': {
+        // /cancel closes the TG-side answer/approval channel; the UI side stays open.
+        let cancelled = false
+        if (this.pendingApprovalsTG.delete(String(chatId))) cancelled = true
+        if (this.pendingAsks.delete(String(chatId))) cancelled = true
+        if (cancelled)
+          await this.enqueueNotice(chatId, '已关闭 TG 端作答/审批（该问题仍可在 Web 端回答）')
+        else
+          await this.client.sendMessage(chatId, '当前没有待作答的提问或审批')
+        return
+      }
       case 'unknown':
         await this.client.sendMessage(chatId, MSG.unknown(parsed.command))
         return
-      case 'plain':
+      case 'plain': {
+        // A pending approval/ask on TG consumes the message as an answer.
+        const approval = this.pendingApprovalsTG.get(String(chatId))
+        if (approval) {
+          await this.handleTgApproval(chatId, approval, parsed.text)
+          return
+        }
+        const pending = this.pendingAsks.get(String(chatId))
+        if (pending) {
+          await this.handleTgAnswer(chatId, pending, parsed.text)
+          return
+        }
         await this.followupBound(chatId, parsed.text)
         return
+      }
     }
   }
 
@@ -425,6 +678,10 @@ export class TelegramBridge {
       ? displayLabel({ ...parts, title: row.title })
       : displayLabel(parts)
     this.bindings.set(String(chatId), { chatId, sessionId: String(agent.id), label })
+    // Drop stale pending asks when rebinding to another session; persist bindings.
+    const stale = this.pendingAsks.get(String(chatId))
+    if (stale && stale.sessionId !== String(agent.id)) this.pendingAsks.delete(String(chatId))
+    this.saveBindings()
     await this.client.answerCallbackQuery(callbackId, '已附着')
     await this.client.sendMessage(chatId, MSG.BOUND(label), undefined, lastContextKeyboard())
   }
@@ -594,12 +851,201 @@ export class TelegramBridge {
       await this.client.sendMessage(chatId, MSG.STATUS_NONE)
       return
     }
-    const stillLive = this.findLiveAgent(binding.sessionId)
-    if (!stillLive) {
-      await this.client.sendMessage(chatId, MSG.STATUS_BOUND_COLD(binding.label))
+    const info: StatusInfo = {
+      label: binding.label,
+      sessionId: binding.sessionId,
+    }
+    // 冷会话：不强制 resume（只读查询），给出可用的绑定/工作区信息即可。
+    const agent = this.findLiveAgent(binding.sessionId)
+    if (!agent) {
+      info.live = false
+      info.workspace = await this.workspaceOf(binding.sessionId, undefined)
+      await this.client.sendMessage(chatId, formatStatusText(info))
       return
     }
-    await this.client.sendMessage(chatId, MSG.STATUS_BOUND(binding.label))
+    info.live = true
+    info.workspace = await this.workspaceOf(binding.sessionId, agent)
+    try {
+      const snap = await loadSessionModels(this.ctx, binding.sessionId)
+      if (snap.current) {
+        info.model = {
+          provider: snap.current.provider,
+          model: snap.current.model,
+          reasoningEffort: snap.current.reasoningEffort,
+        }
+      }
+    } catch (err) {
+      this.ctx.logger.warn(`dsh-telegram-channel: /status model read failed: ${this.redact(err)}`)
+    }
+    info.runtime = this.readRuntimeValues(agent)
+    await this.client.sendMessage(chatId, formatStatusText(info))
+  }
+
+  /** 按 sessionId 解析工作区：apiProxy 目录优先，冷/热会话均可用；退化为 agent cwd。 */
+  private async workspaceOf(sessionId: string, agent: Agent | undefined): Promise<StatusWorkspace | undefined> {
+    try {
+      const catalog = await this.resolveCatalog()
+      const ws = (catalog?.workspaces ?? []).find((w) => (w.sessionIds ?? []).includes(sessionId))
+      if (ws) {
+        return { title: ws.title || undefined, path: ws.path || undefined }
+      }
+      const row = catalog?.sessionsById?.get(sessionId)
+      if (row?.cwd) {
+        return { title: workspaceName(row.cwd) || undefined, path: row.cwd }
+      }
+    } catch {
+      // 目录不可用 → 继续走 agent 侧兜底
+    }
+    if (agent) {
+      const parts = describeAgent(agent, 0, this.ctx)
+      if (parts.cwd) {
+        return { title: parts.workspace || undefined, path: parts.cwd }
+      }
+    }
+    return undefined
+  }
+
+  /** 从 sessionProjections 快照读 Web 底部同款统计（sessionStats/tokenUsage/contextPressure）。 */
+  private readRuntimeValues(agent: Agent): StatusRuntime | undefined {
+    const registry = this.serviceOf<ProjectionRegistryLike>('sessionProjections')
+    let values: Record<string, unknown> | undefined
+    if (registry?.snapshot) {
+      try {
+        values = registry.snapshot(agent.session)?.values
+      } catch (err) {
+        this.ctx.logger.warn(`dsh-telegram-channel: projection snapshot failed: ${this.redact(err)}`)
+      }
+    }
+    if (!values) return undefined
+
+    const num = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? v : undefined
+    const stats = (values['sessionStats'] ?? {}) as Record<string, unknown>
+    const usage = (values['tokenUsage'] ?? {}) as Record<string, unknown>
+    const pressure = (values['contextPressure'] ?? {}) as Record<string, unknown>
+
+    const runtime: StatusRuntime = {
+      turns: num(stats.turns),
+      steps: num(stats.steps),
+      llmMs: num(stats.llmMs),
+      toolMs: num(stats.toolMs),
+      ttftMs: num(stats.ttftMs),
+      ttftSteps: num(stats.ttftSteps),
+      decodeMs: num(stats.decodeMs),
+      decodeTokens: num(stats.decodeTokens),
+      uncachedInputTokens: num(usage.uncachedInputTokens),
+      cacheReadTokens: num(usage.cacheReadTokens),
+      cacheWriteTokens: num(usage.cacheWriteTokens),
+      outputTokens: num(usage.outputTokens),
+      contextUsed: num(pressure.projectedTokens) ?? num(pressure.pressureTokens),
+      contextWindow: num(pressure.contextWindow),
+    }
+    // 完全无数据时视为无统计块。
+    const hasAny = Object.values(runtime).some((v) => v !== undefined)
+    return hasAny ? runtime : undefined
+  }
+
+  /** 按名称解析宿主服务（Cordis 需 ctx.get；mock/plain ctx 走自有属性兜底）。 */
+  private serviceOf<T>(name: string): T | undefined {
+    const c = this.ctx as { get?: (name: string, strict?: boolean) => unknown }
+    if (typeof c.get === 'function') {
+      try {
+        const via = c.get(name, false)
+        if (via) return via as T
+      } catch {
+        // 服务未装配或当前 ctx 不可解析
+      }
+    }
+    try {
+      if (Object.prototype.hasOwnProperty.call(this.ctx, name)) {
+        return (this.ctx as unknown as Record<string, unknown>)[name] as T
+      }
+    } catch {
+      // proxy ctx：无 inject 直接读属性会抛错，忽略
+    }
+    return undefined
+  }
+
+  // ── /compact：手动压缩当前绑定会话（需会话空闲）──
+  //
+  // 压缩引擎（compaction-basic）挂载在隔离作用域，插件 ctx 拿不到；但宿主的
+  // command-compact 已把 /compact 注册进命令运行时的按 agent 作用层（Web 端
+  // 同款通道），因此这里复用它：语义、busy/错误映射、命令生命周期日志与 Web
+  // 端 /compact 完全一致，且无需接触引擎内部。
+
+  private async requestCompact(chatId: number): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    if (!binding) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    if (this.compacting.has(binding.sessionId)) {
+      await this.client.sendMessage(chatId, MSG.COMPACT_INFLIGHT)
+      return
+    }
+    const agent = await this.ensureLiveAgent(binding.sessionId)
+    if (!agent) {
+      this.bindings.delete(String(chatId))
+      await this.client.sendMessage(chatId, MSG.GONE)
+      return
+    }
+    const commands = this.serviceOf<CommandsRuntimeLike>('commands')
+    if (!commands?.execute || typeof commands.find !== 'function' || !commands.find(agent, 'compact')) {
+      await this.client.sendMessage(chatId, MSG.COMPACT_UNAVAILABLE)
+      return
+    }
+    // 会话正在跑任务时压缩会被拒（runMaintenance 忙）；提前提示避免「已开始→失败」两步。
+    const busy = this.busySessions.has(binding.sessionId)
+      || Boolean((agent as { phase?: { kind?: string } }).phase?.kind
+        && (agent as { phase?: { kind?: string } }).phase?.kind !== 'idle')
+    if (busy) {
+      await this.client.sendMessage(chatId, MSG.COMPACT_BUSY)
+      return
+    }
+    const controller = new AbortController()
+    this.compacting.add(binding.sessionId)
+    this.compactAborts.set(binding.sessionId, controller)
+    await this.client.sendMessage(chatId, MSG.COMPACT_STARTED)
+    const operation = commands.execute(agent as never, '/compact', [], controller.signal)
+    void this.runCompaction(chatId, binding.sessionId, operation, controller).catch((err) => {
+      this.ctx.logger.error(`dsh-telegram-channel: /compact runner crashed: ${this.redact(err)}`)
+    })
+  }
+
+  /** 等待压缩落定并汇报结果（不阻塞轮询循环）。 */
+  private async runCompaction(
+    chatId: number,
+    sessionId: string,
+    operation: Promise<{ commandId: string; result: { kind: string; text?: string } } | undefined>,
+    controller: AbortController,
+  ): Promise<void> {
+    try {
+      const execution = await operation
+      if (execution === undefined) {
+        // find() 通过但 execute 未命中：按未注册处理。
+        await this.enqueueNotice(chatId, MSG.COMPACT_UNAVAILABLE)
+        return
+      }
+      const translated = translateCompactResult(execution.result)
+      if (translated !== undefined) {
+        await this.enqueueNotice(chatId, translated)
+        return
+      }
+      // 无法识别的结果：回退为通用失败 + 宿主原文。
+      const raw = execution.result?.text
+      await this.enqueueNotice(chatId, MSG.COMPACT_FAILED(raw))
+    } catch (err) {
+      if (controller.signal.aborted) {
+        // 桥停止/热重载导致的取消：静默，不打扰（本实例正在退出）。
+        this.ctx.logger.info('dsh-telegram-channel: compaction aborted by bridge stop')
+        return
+      }
+      this.ctx.logger.warn(`dsh-telegram-channel: /compact failed: ${this.redact(err)}`)
+      await this.enqueueNotice(chatId, MSG.COMPACT_FAILED(this.redact(err)))
+    } finally {
+      this.compacting.delete(sessionId)
+      this.compactAborts.delete(sessionId)
+    }
   }
 
   private async followupBound(chatId: number, text: string): Promise<void> {
@@ -618,7 +1064,143 @@ export class TelegramBridge {
       content: [{ type: 'text', text }],
       source: { kind: 'user' },
     })
+    // Busy feedback: mid-turn followups queue silently by design — tell the user.
+    const busy = this.busySessions.has(binding.sessionId)
+      || Boolean((agent as { phase?: { kind?: string } }).phase?.kind
+        && (agent as { phase?: { kind?: string } }).phase?.kind !== 'idle')
     agent.followup(message)
+    if (busy) {
+      await this.enqueueNotice(chatId, '已加入队列：当前任务完成后将处理这条消息')
+    }
+  }
+
+  /**
+   * Extract wire prompt parts from a media message.
+   * Returns undefined when the message carries no media at all; returns [] for
+   * an unsupported media type (the user was already notified); otherwise the
+   * caption text part (when present) followed by the image part.
+   */
+  private async collectMediaParts(chatId: number, message: TelegramMessage): Promise<WireContentPart[] | undefined> {
+    const caption = message.caption?.trim()
+    const textPart: WireContentPart | undefined = caption ? { type: 'text', text: caption } : undefined
+    const withText = (part: WireContentPart): WireContentPart[] =>
+      textPart ? [textPart, part] : [part]
+
+    if (message.photo && message.photo.length > 0) {
+      // TG photo sizes are ordered smallest → largest; the last is the best quality.
+      const best = message.photo[message.photo.length - 1]!
+      const part = await this.downloadImagePart(chatId, best.file_id, 'image/jpeg')
+      return part ? withText(part) : []
+    }
+
+    const doc = message.document
+    if (doc) {
+      if (!doc.mime_type || !IMAGE_MEDIA_TYPES.includes(doc.mime_type)) {
+        await this.enqueueNotice(chatId, MSG.MEDIA_UNSUPPORTED)
+        return []
+      }
+      const part = await this.downloadImagePart(chatId, doc.file_id, doc.mime_type, doc.file_name)
+      return part ? withText(part) : []
+    }
+
+    return undefined
+  }
+
+  /** Download one TG file and encode it as a canonical-base64 wire image part. */
+  private async downloadImagePart(
+    chatId: number,
+    fileId: string,
+    mediaType: string,
+    name?: string,
+  ): Promise<WireContentPart | undefined> {
+    try {
+      const file = await this.client.getFile(fileId)
+      if (!file.file_path) throw new Error('TG 未返回文件路径')
+      const bytes = await this.client.downloadFile(file.file_path)
+      // Buffer base64 is canonical (standard alphabet, no whitespace) — the host
+      // attachment admission rejects non-canonical forms outright.
+      const data = Buffer.from(bytes).toString('base64')
+      return { type: 'image', mediaType, data, ...(name === undefined ? {} : { name }) }
+    } catch (err) {
+      await this.enqueueNotice(chatId, MSG.IMAGE_FAILED(this.redact(err)))
+      return undefined
+    }
+  }
+
+  /**
+   * Album photos arrive as separate updates sharing a media_group_id — debounce
+   * them into ONE prompt so an album does not spawn N sequential turns.
+   */
+  private accumulateMediaGroup(chatId: number, groupId: string, parts: WireContentPart[]): void {
+    const key = `${String(chatId)}:${groupId}`
+    const existing = this.mediaGroups.get(key)
+    if (existing) {
+      clearTimeout(existing.timer)
+      existing.parts.push(...parts)
+    }
+    const entry = existing ?? { chatId, parts: [...parts] }
+    entry.timer = setTimeout(() => {
+      this.mediaGroups.delete(key)
+      this.sendImageFollowup(entry.chatId, entry.parts).catch((err) => {
+        this.ctx.logger.error(this.redact(err))
+      })
+    }, MEDIA_GROUP_WINDOW_MS)
+    this.mediaGroups.set(key, entry)
+  }
+
+  /**
+   * Dispatch an image-bearing message to the bound session through the host
+   * prompt RPC — the exact channel the Web composer uses. The host checks
+   * whether the current model accepts image input, admits the bytes into the
+   * durable attachment store, then queues the message on the agent (mode
+   * 'queue' — same semantics as the text path's agent.followup).
+   */
+  private async sendImageFollowup(chatId: number, parts: WireContentPart[]): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    if (!binding) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    const agent = await this.ensureLiveAgent(binding.sessionId)
+    if (!agent) {
+      this.bindings.delete(String(chatId))
+      await this.client.sendMessage(chatId, MSG.GONE)
+      return
+    }
+    const proxy = resolveApiProxy(this.ctx)
+    if (!proxy?.sessions?.prompt) {
+      await this.enqueueNotice(chatId, '当前宿主不支持会话消息接口（sessions.prompt），无法发送图片。')
+      return
+    }
+    const busy = this.busySessions.has(binding.sessionId)
+      || Boolean((agent as { phase?: { kind?: string } }).phase?.kind
+        && (agent as { phase?: { kind?: string } }).phase?.kind !== 'idle')
+    type PromptResponse = { result?: { ok?: boolean; value?: { accepted?: boolean }; error?: { code?: string; message?: string; details?: { reason?: string } } } }
+    let res: PromptResponse | undefined
+    try {
+      res = await proxy.sessions.prompt({
+        rpcId: randomUUID(),
+        payload: { sessionId: binding.sessionId, mode: 'queue', content: parts },
+      }) as PromptResponse | undefined
+    } catch (err) {
+      await this.enqueueNotice(chatId, MSG.IMAGE_FAILED(this.redact(err)))
+      return
+    }
+    const result = res?.result
+    if (!result?.ok) {
+      const code = result?.error?.code
+      const message = String(result?.error?.message ?? '宿主未确认接收')
+      if (code === 'attachment-error' && result?.error?.details?.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES') {
+        await this.enqueueNotice(chatId, MSG.IMAGE_MODEL_UNSUPPORTED)
+      } else {
+        const detail = `${code ? `[${code}] ` : ''}${message}`.trim()
+        await this.enqueueNotice(chatId, MSG.IMAGE_FAILED(detail))
+      }
+      return
+    }
+    if (busy) {
+      await this.enqueueNotice(chatId, '已加入队列：当前任务完成后将处理这条消息')
+    }
   }
 
   private async pollLoop(): Promise<void> {
@@ -678,56 +1260,684 @@ export class TelegramBridge {
     if (targets.length === 0) return
 
     if (event.type === 'turn/start') {
-      await Promise.all(targets.map((b) => this.client.sendChatAction(b.chatId, 'typing')))
+      // Typing heartbeat — one sendChatAction expires in ~5s, so refresh it
+      // for the whole turn instead of only at start.
+      this.busySessions.add(id)
+      for (const b of targets) this.startTypingHeartbeat(b.chatId)
+      return
+    }
+
+    if (event.type === 'turn/end') {
+      this.busySessions.delete(id)
+      this.thinkingSessions.delete(id)
+      for (const b of targets) this.stopTypingHeartbeat(b.chatId)
+      // Abnormal endings (API failure / abort / crash-recovery) must be
+      // visible on the phone — previously they ended in silence.
+      const reason = event.data?.reason as { kind?: string; error?: { message?: string; code?: string }; reason?: { kind?: string } } | undefined
+      const kind = reason?.kind
+      if (kind === 'error') {
+        const detail = String(reason?.error?.message ?? reason?.error?.code ?? '').replace(/\s+/g, ' ').slice(0, 300)
+        for (const b of targets)
+          this.enqueueNotice(b.chatId, `本轮异常结束（API/内部错误）${detail ? `：${detail}` : ''}`)
+      } else if (kind === 'aborted') {
+        const manual = reason?.reason?.kind === 'user'
+        for (const b of targets)
+          this.enqueueNotice(b.chatId, manual ? '本轮已被手动中止' : '本轮已被中断')
+      } else if (kind === 'interrupted') {
+        for (const b of targets)
+          this.enqueueNotice(b.chatId, '会话曾被异常退出（崩溃恢复），本轮被标记中断')
+      }
+      return
+    }
+
+    if (event.type === 'tool/call') {
+      // Progress summary; ask_user is owned by the provider hook (avoids duplicates).
+      const name = event.data?.name ?? 'tool'
+      if (name === 'ask_user_question') return
+      this.thinkingSessions.set(id, false)
+      if (event.data?.callId !== undefined) {
+        if (this.callNames.size > 400) {
+          const first = this.callNames.keys().next().value
+          if (first !== undefined) this.callNames.delete(first)
+        }
+        this.callNames.set(String(event.data.callId), String(name))
+      }
+      const args = typeof event.data?.arguments === 'string' ? event.data.arguments : ''
+      const brief = args.replace(/\s+/g, ' ').trim()
+      const shown = brief.length > 60 ? `${brief.slice(0, 60)}…` : brief
+      for (const b of targets)
+        this.enqueueNotice(b.chatId, `> ${name}${shown ? ` ${shown}` : ''}`)
       return
     }
 
     if (event.type === 'assistant/message') {
       const text = contentToText(event.data.message.content)
+      this.thinkingSessions.set(id, false)
       if (!text) return
       await Promise.all(targets.map((b) => this.deliver(b.chatId, text)))
+      return
+    }
+
+    if (event.type === 'assistant/chunk') {
+      // Thinking indicator: once per reasoning phase, status only (no content).
+      const chunk = event.data?.chunk as { type?: string; block?: { type?: string } } | undefined
+      const ctype = String(chunk?.type ?? '')
+      const btype = String(chunk?.block?.type ?? '')
+      const isReasoning = ctype.includes('reasoning') || btype.includes('reasoning') || btype.includes('think')
+      if (isReasoning && this.thinkingSessions.get(id) !== true) {
+        this.thinkingSessions.set(id, true)
+        for (const b of targets)
+          this.enqueueNotice(b.chatId, '> Thinking…')
+      }
+      return
+    }
+
+    if (event.type === 'tool/result') {
+      // Only failures — successful results are too noisy for the phone.
+      const data = event.data as { error?: { name?: string; code?: string }; message?: { tool_use_id?: string; callId?: string } }
+      if (data?.error) {
+        const callKey = String(data.message?.tool_use_id ?? data.message?.callId ?? '')
+        const name = this.callNames.get(callKey) ?? 'tool'
+        for (const b of targets)
+          this.enqueueNotice(b.chatId, `> 工具 ${name} 失败：${String(data.error.name ?? 'Error')}${data.error.code ? `/${String(data.error.code)}` : ''}`)
+      }
+      return
+    }
+
+    if (event.type === 'todo/write') {
+      const todos = Array.isArray(event.data?.todos) ? event.data.todos : []
+      this.lastTodos.set(id, todos as Array<{ content?: string; status?: string }>)
+      if (todos.length === 0) return
+      const done = todos.filter((t) => t?.status === 'completed').length
+      const current = todos.find((t) => t?.status === 'in_progress') ?? todos.find((t) => t?.status === 'pending')
+      const cur = current ? String(current.content ?? '').slice(0, 50) : ''
+      for (const b of targets)
+        this.enqueueNotice(b.chatId, `> 进度 ${done}/${todos.length}${cur ? `：${cur}` : ''}`)
+      return
+    }
+  }
+
+  // ── /rich: per-chat rendering mode (persisted) ──
+  //
+  // Rich messages (Bot API sendRichMessage) only render on recent Telegram
+  // clients; old ones (10.x) show the message as “not supported”. The bot cannot
+  // detect the recipient's client version, so the choice is per-chat and manual,
+  // remembered forever. HTML mode is the compat default and works everywhere.
+
+  private async handleRichCommand(chatId: number, arg?: string): Promise<void> {
+    const key = String(chatId)
+    const setAndReply = async (mode: 'rich' | 'html'): Promise<void> => {
+      this.renderPrefs.set(key, mode)
+      this.saveBindings()
+      await this.client.sendMessage(chatId, MSG.RICH_SET(mode))
+    }
+    switch (arg) {
+      case 'on':
+      case 'rich':
+        await setAndReply('rich')
+        return
+      case 'off':
+      case 'html':
+      case 'compat':
+        await setAndReply('html')
+        return
+      case 'auto':
+      case 'default':
+      case 'reset':
+        this.renderPrefs.delete(key)
+        this.saveBindings()
+        await this.client.sendMessage(chatId, MSG.RICH_STATE(this.renderingMode))
+        return
+      case undefined:
+        await this.client.sendMessage(chatId, MSG.RICH_STATE(this.modeFor(chatId)))
+        return
+      default:
+        await this.client.sendMessage(chatId, MSG.RICH_USAGE)
     }
   }
 
   private async deliver(chatId: number, markdown: string): Promise<void> {
-    if (this.renderingMode === 'html') {
-      await this.deliverHtml(chatId, markdown)
-      return
-    }
-
-    let sentAny = false
-    try {
-      const chunks = splitRichMarkdown(markdown)
-      for (const chunk of chunks) {
-        await this.client.sendRichMessage(chatId, chunk)
-        sentAny = true
-      }
-    } catch (err) {
-      if (!sentAny && isRichUnsupportedError(err)) {
-        this.ctx.logger.warn(
-          'dsh-telegram-channel: Rich Message API unavailable, falling back to HTML rendering',
-        )
-        this.renderingMode = 'html'
-        await this.deliverHtml(chatId, markdown)
+    if (this.modeFor(chatId) !== 'html') {
+      let sentAny = false
+      try {
+        const chunks = splitRichMarkdown(markdown)
+        for (const chunk of chunks) {
+          try {
+            // Per-chunk retry: transient network blips must not drop a reply.
+            await this.withRetry(() => this.client.sendRichMessage(chatId, chunk))
+            sentAny = true
+          } catch (err) {
+            if (!sentAny && isRichUnsupportedError(err)) {
+              this.ctx.logger.warn(
+                'dsh-telegram-channel: Rich Message API unavailable, falling back to HTML rendering',
+              )
+              this.renderingMode = 'html'
+              // Rich API being gone is a server-wide fact: per-chat rich overrides
+              // must not bypass the global downgrade (modeFor prefers the override).
+              for (const [key, mode] of this.renderPrefs) {
+                if (mode === 'rich') this.renderPrefs.delete(key)
+              }
+              this.saveBindings()
+              await this.deliverHtml(chatId, markdown)
+              return
+            }
+            throw err
+          }
+        }
         return
+      } catch (err) {
+        // Persistent rich failure → HTML fallback instead of dropping the message.
+        this.ctx.logger.warn(`dsh-telegram-channel: rich deliver failed (${this.redact(err)}), falling back to HTML`)
       }
-      this.ctx.logger.error(this.redact(err))
     }
+    await this.deliverHtml(chatId, markdown)
   }
 
   private async deliverHtml(chatId: number, markdown: string): Promise<void> {
     const chunks = splitMessage(markdown, this.maxMessageLength)
     for (const chunk of chunks) {
-      const html = markdownToHtml(chunk)
+      let html: string
       try {
-        await this.client.sendMessage(chatId, html, 'HTML')
+        html = markdownToHtml(chunk)
+      } catch {
+        html = chunk // Pathological markdown input: degrade to plain text instead of dropping.
+      }
+      try {
+        await this.withRetry(() => this.client.sendMessage(chatId, html, 'HTML'))
       } catch {
         try {
-          await this.client.sendMessage(chatId, chunk)
+          await this.withRetry(() => this.client.sendMessage(chatId, chunk))
         } catch (err) {
           this.ctx.logger.error(this.redact(err))
         }
       }
+    }
+  }
+
+  // ── Stability & interactivity helpers ──
+
+  /** Retry an outbound call with capped linear backoff (500ms, 1s, 2s… max 4s). */
+  private async withRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
+    let lastErr: unknown
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      try {
+        return await fn()
+      } catch (err) {
+        lastErr = err
+        if (attempt < tries) await this.sleep(Math.min(500 * 2 ** (attempt - 1), 4000))
+      }
+    }
+    throw lastErr
+  }
+
+  /**
+   * Send a notice; a leading `> ` keeps the quote look via a plain-text `> `
+   * prefix. NB: NOT `<blockquote>` HTML — older Telegram clients cannot render
+   * the blockquote entity at all and show the whole message as “not supported”.
+   * Falls back to plain text when the send fails — a notice is never lost.
+   */
+  private async deliverNotice(chatId: number, text: string): Promise<void> {
+    const quoted = text.startsWith('> ')
+    const body = quoted ? text.slice(2) : text
+    try {
+      await this.withRetry(() => this.client.sendMessage(chatId, quoted ? `> ${body}` : body))
+      return
+    } catch (err) {
+      this.ctx.logger.error(this.redact(err))
+    }
+  }
+
+  /** Serialized per-chat notice chain — bursts can't race into Telegram 429s. */
+  private enqueueNotice(chatId: number, text: string): Promise<void> {
+    const key = String(chatId)
+    const prev = this.noticeQueue.get(key) ?? Promise.resolve()
+    const next = prev.then(() => this.deliverNotice(chatId, text)).catch(() => {})
+    this.noticeQueue.set(key, next)
+    return next
+  }
+
+  private startTypingHeartbeat(chatId: number): void {
+    this.stopTypingHeartbeat(chatId)
+    const send = (): void => {
+      void this.client.sendChatAction(chatId, 'typing').catch(() => {})
+    }
+    send()
+    this.heartbeats.set(String(chatId), setInterval(send, 4000))
+  }
+
+  private stopTypingHeartbeat(chatId: number): void {
+    const h = this.heartbeats.get(String(chatId))
+    if (h) {
+      clearInterval(h)
+      this.heartbeats.delete(String(chatId))
+    }
+  }
+
+  private stopAllHeartbeats(): void {
+    for (const h of this.heartbeats.values()) clearInterval(h)
+    this.heartbeats.clear()
+  }
+
+  // ── ask_user_question: TG answering via dual-path race with the UI ──
+
+  private userQuestions(): UserQuestionsServiceLike | undefined {
+    const ctx = this.ctx as Context & {
+      get?: (name: string, strict?: boolean) => unknown
+      userQuestions?: UserQuestionsServiceLike
+    }
+    if (typeof ctx.get === 'function') {
+      try {
+        const service = ctx.get('userQuestions') as UserQuestionsServiceLike | undefined
+        if (service) return service
+      } catch {
+        // Continue to the plain-object fallback used by tests and simple hosts.
+      }
+    }
+    try {
+      return Object.prototype.hasOwnProperty.call(ctx, 'userQuestions')
+        ? ctx.userQuestions
+        : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Wrap the UI provider's ask() so Telegram gets a parallel answer path.
+   * `Promise.race` decides; the UI path is untouched. The TG promise NEVER
+   * settles when there is no bound chat — race would kill the UI's window
+   * with that early rejection.
+   */
+  private hookUserQuestions(attempt = 0): void {
+    try {
+      const provider = this.userQuestions()?.provider
+      if (provider) {
+        if (provider.__tgHooked && provider.__tgRealAsk) {
+          // Hot reload: re-point the wrapper at THIS bridge instance.
+          const realAsk = provider.__tgRealAsk
+          const self = this
+          provider.ask = function (request: unknown): Promise<unknown> {
+            const tg = self.registerTgAsk(request)
+            let gui: Promise<unknown>
+            try {
+              gui = realAsk(request)
+            } catch (err) {
+              tg.reject(err as Error)
+              throw err
+            }
+            void gui.then(() => self.settleGuiSide(request), () => self.settleGuiSide(request))
+            return Promise.race([tg.promise, gui])
+          }
+          return
+        }
+        const realAsk = provider.ask.bind(provider) as (request: unknown) => Promise<unknown>
+        provider.__tgRealAsk = realAsk
+        const self = this
+        provider.ask = function (request: unknown): Promise<unknown> {
+          const tg = self.registerTgAsk(request)
+          let gui: Promise<unknown>
+          try {
+            gui = realAsk(request)
+          } catch (err) {
+            tg.reject(err as Error)
+            throw err
+          }
+          void gui.then(() => self.settleGuiSide(request), () => self.settleGuiSide(request))
+          return Promise.race([tg.promise, gui])
+        }
+        provider.__tgHooked = true
+        this.ctx.logger.info('dsh-telegram-channel: ask_user TG answering hook installed')
+        return
+      }
+    } catch (err) {
+      if (attempt === 0)
+        this.ctx.logger.warn(`dsh-telegram-channel: userQuestions hook deferred: ${this.redact(err)}`)
+    }
+    if (attempt >= 30) {
+      this.ctx.logger.warn('dsh-telegram-channel: user-questions provider never appeared; TG answering disabled')
+      return
+    }
+    this.hookTimer = setTimeout(() => this.hookUserQuestions(attempt + 1), 2000)
+  }
+
+  private registerTgAsk(request: unknown): { promise: Promise<unknown>; reject: (err: Error) => void } {
+    let resolveFn: (v: unknown) => void = () => {}
+    let rejectFn: (err: Error) => void = () => {}
+    const promise = new Promise<unknown>((resolve, reject) => {
+      resolveFn = resolve
+      rejectFn = reject
+    })
+    const ask: TgAnswerHandle = { resolve: resolveFn, reject: rejectFn, answered: false }
+    const req = request as { agent?: Agent; questions?: TgQuestionItem[]; signal?: AbortSignal }
+    const sessionId = req.agent?.id !== undefined ? String(req.agent.id) : undefined
+    const questions = Array.isArray(req.questions) ? req.questions : []
+    const onAbort = (): void => {
+      for (const [chatId, p] of this.pendingAsks) {
+        if (p.ask === ask) this.pendingAsks.delete(chatId)
+      }
+      rejectFn(new Error('ask aborted'))
+    }
+    if (req.signal?.aborted) {
+      rejectFn(new Error('ask aborted'))
+      return { promise, reject: rejectFn }
+    }
+    req.signal?.addEventListener('abort', onAbort, { once: true })
+    if (sessionId !== undefined && questions.length > 0) {
+      let asked = false
+      for (const [chatId, binding] of this.bindings) {
+        if (binding.sessionId !== sessionId) continue
+        this.pendingAsks.set(String(chatId), { req: request, sessionId, questions, ask, at: Date.now() })
+        this.enqueueNotice(Number(chatId), this.formatAskPending(questions))
+        asked = true
+      }
+      if (asked) return { promise, reject: rejectFn }
+    }
+    // No bound TG chat: never settle — the UI remains the only answer path.
+    return { promise, reject: rejectFn }
+  }
+
+  private settleGuiSide(request: unknown): void {
+    for (const [chatId, p] of [...this.pendingAsks]) {
+      if (p.req !== request) continue
+      this.pendingAsks.delete(chatId)
+      if (!p.ask.answered) {
+        this.enqueueNotice(Number(chatId), '该问题已在 Web 端作答，TG 作答通道关闭')
+      }
+    }
+  }
+
+  private formatAskPending(questions: TgQuestionItem[]): string {
+    const lines = ['待回答（回复字母选项，或直接输入自定义答案；/cancel 关闭 TG 作答）']
+    questions.forEach((q, i) => {
+      const prefix = questions.length > 1 ? `Q${i + 1}. ` : ''
+      lines.push(`${prefix}${q.question ?? ''}`)
+      const opts = Array.isArray(q.options) ? q.options : []
+      if (opts.length === 0) {
+        lines.push('  （开放问题，直接输入答案）')
+      } else {
+        opts.forEach((o, j) => lines.push(`  [${String.fromCharCode(65 + j)}] ${o.label}${o.description ? ` — ${o.description}` : ''}`))
+        if (q.multiSelect) lines.push('  （可多选，如：A,B）')
+      }
+    })
+    return lines.join('\n')
+  }
+
+  private async handleTgAnswer(chatId: number, pending: TgPendingAsk, text: string): Promise<void> {
+    const { questions, ask } = pending
+    let parts: Array<[number | null, string]>
+    if (questions.length === 1) {
+      parts = [[0, text.trim()]]
+    } else {
+      parts = []
+      const lines = text.split(/\n|；|;/).map((s) => s.trim()).filter(Boolean)
+      for (const line of lines) {
+        const m = line.match(/^([0-9]+)\s*[:：.、)]\s*(.+)$/)
+        if (m) parts.push([Number(m[1]) - 1, m[2]!.trim()])
+        else parts.push([null, line])
+      }
+      if (parts.some(([idx]) => idx === null)) {
+        await this.enqueueNotice(chatId, `共 ${questions.length} 个问题，请每行用 1:/2: 前缀分别作答`)
+        return
+      }
+    }
+    const answers: Array<{ id?: string; selected: string[]; custom?: string }> = []
+    for (const [idx, raw] of parts) {
+      if (idx === null || idx < 0 || idx >= questions.length) {
+        await this.enqueueNotice(chatId, `题号 ${(idx ?? 0) + 1} 不存在（共 ${questions.length} 题）`)
+        return
+      }
+      const q = questions[idx]!
+      const cleaned = raw.replace(/^\[+/, '').replace(/\]+$/, '').trim()
+      const letters = cleaned.split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
+      const opts = Array.isArray(q.options) ? q.options : []
+      const isLetterChoice = letters.length > 0
+        && letters.every((s) => /^[a-zA-Z]$/.test(s))
+        && opts.length > 0
+      if (isLetterChoice) {
+        const selected: string[] = []
+        for (const s of letters) {
+          const i = s.toUpperCase().charCodeAt(0) - 65
+          if (i < 0 || i >= opts.length) {
+            await this.enqueueNotice(chatId, `选项 ${s.toUpperCase()} 不存在（范围 A-${String.fromCharCode(64 + opts.length)}），请重答或 /cancel`)
+            return
+          }
+          selected.push(opts[i]!.label)
+        }
+        answers.push({ id: q.id, selected })
+      } else {
+        answers.push({ id: q.id, selected: [], custom: cleaned })
+      }
+    }
+    ask.answered = true
+    for (const [cid, p] of this.pendingAsks) {
+      if (p.ask === ask) this.pendingAsks.delete(cid)
+    }
+    ask.resolve({ answers })
+    this.enqueueNotice(chatId, '已提交你的回答')
+  }
+
+  // ── approval: TG answering via dual-path race on the request waterfall ──
+
+  private async onApprovalRequest(
+    req: ApprovalRequestLike,
+    next: () => Promise<string>,
+  ): Promise<string> {
+    const sessionId = req?.agent?.id !== undefined ? String(req.agent.id) : undefined
+    const targets = sessionId !== undefined
+      ? [...this.bindings.values()].filter((b) => b.sessionId === sessionId).map((b) => String(b.chatId))
+      : []
+    let resolveFn: (v: unknown) => void = () => {}
+    let rejectFn: (err: Error) => void = () => {}
+    const promise = new Promise<unknown>((resolve, reject) => {
+      resolveFn = resolve
+      rejectFn = reject
+    })
+    const ask: TgAnswerHandle = { resolve: resolveFn, reject: rejectFn, answered: false }
+    const onAbort = (): void => {
+      for (const [chatId, p] of this.pendingApprovalsTG) {
+        if (p.ask === ask) this.pendingApprovalsTG.delete(chatId)
+      }
+      rejectFn(new Error('approval withdrawn'))
+    }
+    if (req?.signal?.aborted) {
+      rejectFn(new Error('approval withdrawn'))
+      return next()
+    }
+    req?.signal?.addEventListener('abort', onAbort, { once: true })
+    if (targets.length > 0) {
+      const toolName = String(req?.toolName ?? 'tool')
+      const reason = req?.reason ? String(req.reason).slice(0, 200) : ''
+      for (const chatId of targets) {
+        this.pendingApprovalsTG.set(chatId, { toolName, ask })
+        this.enqueueNotice(Number(chatId), `权限审批：${toolName}${reason ? `\n(${reason})` : ''}\n回复 [A] 允许一次 / [B] 拒绝（/cancel 关闭 TG 审批）`)
+      }
+    }
+    // No bound TG chat: promise never settles — the UI remains the only answer path.
+    const gui = next()
+    void gui.then(() => {
+      for (const [chatId, p] of [...this.pendingApprovalsTG]) {
+        if (p.ask !== ask) continue
+        this.pendingApprovalsTG.delete(chatId)
+        if (!p.ask.answered) {
+          p.ask.reject(new Error('superseded-by-gui'))
+          this.enqueueNotice(Number(chatId), '该审批已在 Web 端处理')
+        }
+      }
+    }, () => {
+      for (const [chatId, p] of [...this.pendingApprovalsTG]) {
+        if (p.ask === ask) this.pendingApprovalsTG.delete(chatId)
+      }
+    })
+    return Promise.race([promise, gui]) as Promise<string>
+  }
+
+  private async handleTgApproval(chatId: number, approval: TgPendingApproval, text: string): Promise<void> {
+    const cleaned = text.trim().replace(/^\[+/, '').replace(/\]+$/, '').toUpperCase()
+    if (cleaned === 'A' || cleaned === 'B') {
+      approval.ask.answered = true
+      for (const [cid, p] of this.pendingApprovalsTG) {
+        if (p.ask === approval.ask) this.pendingApprovalsTG.delete(cid)
+      }
+      if (cleaned === 'A') {
+        approval.ask.resolve('allowed-once')
+        await this.enqueueNotice(chatId, `已允许 ${approval.toolName} 执行一次`)
+      } else {
+        approval.ask.resolve('rejected')
+        await this.enqueueNotice(chatId, '已拒绝该工具执行')
+      }
+      return
+    }
+    await this.enqueueNotice(chatId, '请回复 [A] 允许一次 或 [B] 拒绝（/cancel 关闭）')
+  }
+
+  // ── /stop /mission /new commands ──
+
+  private async stopBound(chatId: number): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    if (!binding) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    const agent = this.findLiveAgent(binding.sessionId)
+    if (!agent) {
+      await this.client.sendMessage(chatId, '当前会话没有正在运行的任务')
+      return
+    }
+    try {
+      agent.cancel({ kind: 'user' })
+    } catch (err) {
+      this.ctx.logger.warn(`dsh-telegram-channel: stop failed: ${this.redact(err)}`)
+    }
+    await this.enqueueNotice(chatId, '已请求中止当前轮…')
+  }
+
+  private async sendMission(chatId: number): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    if (!binding) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    const todos = this.lastTodos.get(binding.sessionId) ?? []
+    const lines = ['任务清单']
+    if (todos.length === 0) {
+      lines.push('（暂无任务记录，agent 使用 todo 工具后这里会显示）')
+    } else {
+      const mark: Record<string, string> = { completed: '✓', in_progress: '⟳', pending: '·' }
+      todos.forEach((t, i) => lines.push(`${mark[t?.status ?? ''] ?? '·'} ${i + 1}. ${String(t?.content ?? '')}`))
+      const done = todos.filter((t) => t?.status === 'completed').length
+      lines.push(`—— ${done}/${todos.length} 已完成`)
+    }
+    lines.push(this.busySessions.has(binding.sessionId) ? '（当前任务：运行中，/stop 可中止）' : '（当前空闲）')
+    await this.client.sendMessage(chatId, lines.join('\n'))
+  }
+
+  /** /new: create a session in the bound session's workspace and attach to it. */
+  private async newSessionHere(chatId: number): Promise<void> {
+    const binding = this.bindings.get(String(chatId))
+    if (!binding) {
+      await this.client.sendMessage(chatId, MSG.NEED_BIND)
+      return
+    }
+    let workspaceId: string | undefined
+    let fallbackCwd: string | undefined
+    try {
+      const catalog = await this.resolveCatalog()
+      for (const ws of catalog?.workspaces ?? []) {
+        if ((ws.sessionIds ?? []).includes(binding.sessionId)) {
+          workspaceId = ws.id
+          break
+        }
+      }
+      if (workspaceId === undefined)
+        fallbackCwd = catalog?.sessionsById?.get(binding.sessionId)?.cwd
+    } catch {
+      // Catalog unavailable → fall back to the host default workspace.
+    }
+    const proxy = resolveApiProxy(this.ctx)
+    if (!proxy?.sessions?.create) {
+      await this.client.sendMessage(chatId, '当前宿主不支持会话创建接口')
+      return
+    }
+    let res: { result?: { ok?: boolean; value?: { sessionId?: string }; error?: { message?: string } } } | undefined
+    try {
+      const payload = workspaceId !== undefined ? { workspaceId } : (fallbackCwd ? { cwd: fallbackCwd } : {})
+      res = await proxy.sessions.create({
+        rpcId: `tg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        payload,
+      }) as typeof res
+    } catch (err) {
+      await this.client.sendMessage(chatId, `创建失败：${this.redact(err)}`)
+      return
+    }
+    const newId = res?.result?.ok ? res.result.value?.sessionId : undefined
+    if (!newId) {
+      const detail = res?.result?.error?.message ?? JSON.stringify(res?.result ?? res)
+      await this.client.sendMessage(chatId, `创建失败：${String(detail).slice(0, 200)}`)
+      return
+    }
+    const stale = this.pendingAsks.get(String(chatId))
+    if (stale && stale.sessionId !== String(newId)) this.pendingAsks.delete(String(chatId))
+    this.bindings.set(String(chatId), { chatId, sessionId: String(newId), label: binding.label })
+    this.saveBindings()
+    const where = workspaceId !== undefined ? '当前工作区' : (fallbackCwd ? `目录 ${fallbackCwd}` : '默认工作区')
+    await this.client.sendMessage(chatId, `已在${where}新开对话并附着：\n${String(newId)}\n直接发消息即可开始`)
+  }
+
+  // ── Binding persistence (survives hot reload / restart) ──
+
+  private bindingsPath(): string {
+    // DSH_TELEGRAM_BINDINGS_FILE overrides the location (tests must isolate
+    // from the real profile data — parallel test files share this file).
+    const override = process.env.DSH_TELEGRAM_BINDINGS_FILE
+    if (override) return override
+    const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+    return join(home, 'telegram-channel-bindings.json')
+  }
+
+  private saveBindings(): void {
+    try {
+      const obj = {
+        bindings: Object.fromEntries(this.bindings),
+        renderPrefs: Object.fromEntries(this.renderPrefs),
+      }
+      mkdirSync(dirname(this.bindingsPath()), { recursive: true })
+      writeFileSync(this.bindingsPath(), JSON.stringify(obj, null, 2))
+    } catch (err) {
+      this.ctx.logger.warn(`dsh-telegram-channel: saveBindings failed: ${this.redact(err)}`)
+    }
+  }
+
+  private loadBindings(): void {
+    try {
+      const raw = readFileSync(this.bindingsPath(), 'utf8')
+      const parsed = JSON.parse(raw) as unknown
+      const data = parsed as {
+        bindings?: Record<string, { chatId?: number; sessionId?: string; label?: string }>
+        renderPrefs?: Record<string, string>
+      }
+      // Legacy files (pre-renderPrefs) stored the bindings flat at the top level.
+      const flat = parsed as Record<string, { chatId?: number; sessionId?: string; label?: string }>
+      const bindingEntries = data.bindings ?? flat
+      let n = 0
+      for (const [chatId, b] of Object.entries(bindingEntries ?? {})) {
+        if (b && b.sessionId) {
+          this.bindings.set(String(chatId), {
+            chatId: b.chatId ?? Number(chatId),
+            sessionId: String(b.sessionId),
+            label: b.label ?? String(b.sessionId),
+          })
+          n += 1
+        }
+      }
+      for (const [chatId, mode] of Object.entries(data.renderPrefs ?? {})) {
+        if (mode === 'rich' || mode === 'html') {
+          this.renderPrefs.set(String(chatId), mode)
+        }
+      }
+      if (n > 0)
+        this.ctx.logger.info(`dsh-telegram-channel: restored ${n} binding(s) from disk`)
+    } catch {
+      // First run: no file yet.
     }
   }
 

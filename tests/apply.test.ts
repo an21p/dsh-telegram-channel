@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { apply, inject } from '../src/index.ts'
 
-test('apiProxy is optional and is not a hard Cordis dependency', () => {
+test('optional host services are not hard Cordis dependencies', () => {
   assert.deepEqual(inject, ['agents'])
 })
 

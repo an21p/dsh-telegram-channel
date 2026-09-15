@@ -34,6 +34,8 @@ Telegram **手机遥控器** for DeepSeek Harness：附着本机正在跑的 Web
 2. 手机 Bot：`/sessions` → **工作区** → **会话** → 附着  
 3. 之后手机 ↔ Web 走**同一条**轨迹；可用 `/model` 切换模型（下一回合生效）
 
+支持的消息：文本、图片（照片或以文件形式发送的 png/jpeg/webp/gif，可带文字说明；多张相册照片合并为一条消息进入会话）。语音/视频/其他文件暂不支持（会收到提示）。图片经宿主附件服务持久化，与 Web 端上传走同一通道；当前模型不支持图像输入时会收到明确提示。
+
 ### 效果截图
 
 手机选择会话并发问：
@@ -120,14 +122,15 @@ curl -fsSL https://raw.githubusercontent.com/hi-wenw/dsh-telegram-channel/master
 4. 需要换模型时：`/model` → 点选（与 Web 同 API，下一回合生效）  
 5. 续接上下文：附着后点 **查看上次对话**，或发 `/last`
 
-输入框旁的 **/** 菜单应有：`start` `sessions` `last` `model` `status` `unbind` `help`。
+输入框旁的 **/** 菜单应有：`start` `sessions` `last` `model` `status` `compact` `unbind` `help`。
 
 | 命令 | 作用 |
 |---|---|
 | `/sessions` | 先列工作区，再列该工作区会话（与 Web 对齐，排除归档/空白/子代理）；冷会话附着时会自动 resume |
 | `/last` | 查看绑定会话的**上次问答**（附着后也会出现「查看上次对话」按钮） |
 | `/model` | 切换当前绑定会话的模型 |
-| `/status` | 当前绑定 |
+| `/status` | 通用状态显示：绑定会话/会话 ID/工作区/当前模型/思考强度/上下文长度/首 token 平均/输出速率/输入输出 tokens（与 Web 底部统计条同源） |
+| `/compact` | 手动压缩当前绑定会话的历史（缩短上下文；会话需空闲，压缩期间新消息排队） |
 | `/unbind` | 只断开手机，**不关**电脑会话 |
 | `/help` | 帮助 |
 

@@ -17,6 +17,19 @@ export type ApiProxySessions = {
         rpcId: string;
         payload: unknown;
     }) => Promise<unknown>;
+    /** Create a session (used by /new; payload: workspaceId | cwd). */
+    create?: (req: {
+        rpcId: string;
+        payload: unknown;
+    }) => Promise<unknown>;
+    /**
+     * Prompt dispatch (Web 端同通道)：文本 + 图片字节(base64)经宿主附件服务持久化后
+     * 进入会话；含图片时会校验当前模型是否支持图像输入。
+     */
+    prompt?: (req: {
+        rpcId: string;
+        payload: unknown;
+    }) => Promise<unknown>;
 };
 export type ApiProxyLike = {
     workspace?: {

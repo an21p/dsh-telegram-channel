@@ -18,6 +18,20 @@ test('parse slash commands for remote control', () => {
   assert.equal(parseCommand('hello').type, 'plain')
 })
 
+test('parse /rich with optional mode argument', () => {
+  const bare = parseCommand('/rich')
+  assert.equal(bare.type, 'rich')
+  assert.equal(bare.type === 'rich' ? bare.arg : 'x', undefined)
+  const on = parseCommand('/rich on')
+  assert.equal(on.type, 'rich')
+  assert.equal(on.type === 'rich' ? on.arg : 'x', 'on')
+  assert.equal(parseCommand('/rich off').type === 'rich' && parseCommand('/rich off').arg, 'off')
+  assert.equal(parseCommand('/rich ON').type === 'rich' && parseCommand('/rich ON').arg, 'on')
+  assert.equal(parseCommand('/render auto').type === 'rich' && parseCommand('/render auto').arg, 'auto')
+  assert.equal(parseCommand('/setting').type, 'rich')
+  assert.equal(parseCommand('/setting html').type === 'rich' && parseCommand('/setting html').arg, 'html')
+})
+
 test('Chinese copy mentions sessions and bind', () => {
   assert.ok(MSG.DENIED.includes('权限') || MSG.DENIED.includes('授权'))
   assert.ok(MSG.HELP.includes('/sessions'))
@@ -25,4 +39,10 @@ test('Chinese copy mentions sessions and bind', () => {
   assert.ok(MSG.HELP.includes('/model'))
   assert.ok(MSG.NEED_BIND.includes('/sessions'))
   assert.ok(MSG.WELCOME.includes('Web') || MSG.WELCOME.includes('遥控器'))
+})
+
+test('parse /compact', () => {
+  assert.equal(parseCommand('/compact').type, 'compact')
+  assert.equal(parseCommand('/compact@MyBot').type, 'compact')
+  assert.equal(parseCommand('/compact now').type, 'compact')
 })
