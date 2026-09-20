@@ -128,12 +128,21 @@ Notes that cost time if you discover them the hard way:
   `@deepseek-ai/*` or `node:*` import fails to resolve, link the profile's
   installed copies into `node_modules` rather than reinstalling from the registry
   (some peers, e.g. `@deepseek-ai/dsh-type-meta`, are not published to npm).
-- Two environment variables isolate state in tests and harnesses:
-  `DSH_TELEGRAM_BINDINGS_FILE` overrides the bindings path (upstream's own tests
-  set it) and `DSH_HOME` relocates the profile home. Without
-  `DSH_TELEGRAM_BINDINGS_FILE`, any code that binds a chat **overwrites the real
-  `~/.dsh/telegram-channel-bindings.json`** — the plugin writes in place with no
-  temp-and-rename, so the previous contents are not recoverable.
+- **Bindings isolation.** The plugin persists chat bindings to
+  `<DSH_HOME>/telegram-channel-bindings.json`, overridable with
+  `DSH_TELEGRAM_BINDINGS_FILE`. It writes **in place** with `writeFileSync` — no
+  temp-and-rename — so anything that binds a chat without the override
+  **overwrites the real file and the previous contents are unrecoverable**,
+  which also breaks a live bot (its next message tries to resume a session id
+  that only ever existed in a test).
+
+  `pnpm test` is safe: `tests/setup-env.ts` sets an isolated temp path before any
+  test module loads. If you write your own harness, set
+  `DSH_TELEGRAM_BINDINGS_FILE` yourself, and **never `delete` it in a teardown** —
+  restoring it to undefined makes the next `saveBindings()` fall back to the real
+  profile path and clobber it.
+- `DSH_HOME` relocates the profile home (and therefore the default bindings and
+  attachment store paths).
 
 ### Troubleshooting
 
@@ -143,6 +152,7 @@ Notes that cost time if you discover them the hard way:
 | Images rejected | The bound session's model is text-only. `/model` → pick a multimodal model. |
 | No images forwarded | The session produced none, or the attachment bytes are unreadable — the bot reports the latter explicitly. |
 | Bot silent, no reply | Check the token and that `dsh web` was restarted after the plugin changed. |
+| Bot says the bound session is gone right after you attached | Something overwrote `~/.dsh/telegram-channel-bindings.json` with a stale id (a test harness is the usual culprit). Send `/sessions` to re-attach. |
 | Menu still in the old language | `setMyCommands` runs at boot; restart `dsh web`. |
 | `ERR_PNPM_IGNORED_BUILDS` | Approve the git specifier in the profile's `pnpm-workspace.yaml`. |
 
