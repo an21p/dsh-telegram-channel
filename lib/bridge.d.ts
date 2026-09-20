@@ -55,6 +55,8 @@ export declare class TelegramBridge {
     private readonly compactAborts;
     /** Album accumulation: chatId:media_group_id → parts buffered into one prompt. */
     private readonly mediaGroups;
+    /** attachmentId set: dedups outbound images seen in both a tool result and a reply. */
+    private readonly sentImages;
     constructor(ctx: Context, options: TelegramBridgeOptions);
     /** Effective rendering mode for a chat: per-chat override, else the global mode. */
     private modeFor;
@@ -114,6 +116,27 @@ export declare class TelegramBridge {
     private handleRichCommand;
     private deliver;
     private deliverHtml;
+    /**
+     * Read the bytes behind one durable image reference.
+     *
+     * Prefers the mounted attachment service (`ctx.attachments`), whose
+     * `imageHostPath` maps a reference to the stored object. Falls back to the
+     * documented content-addressed layout (`<DSH_HOME>/attachments/v1/objects/
+     * <aa>/<sha256>`) when the service is not reachable from this context, so
+     * forwarding still works on hosts that keep the service in a scope the plugin
+     * cannot see.
+     */
+    private readImageBytes;
+    /** Pick a safe upload filename; never trust the reference's name verbatim. */
+    private outboundImageName;
+    /**
+     * Forward every image attached to one session event to the bound chats.
+     *
+     * Sent as DOCUMENTS, not photos: Telegram's sendPhoto re-encodes to JPEG and
+     * caps dimensions, which destroys screenshots and UI text. Documents keep the
+     * exact bytes.
+     */
+    private forwardImages;
     /** Retry an outbound call with capped linear backoff (500ms, 1s, 2s… max 4s). */
     private withRetry;
     /**

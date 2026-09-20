@@ -12,6 +12,31 @@
 > Based on upstream commit `2e9a307`. Everything below is unchanged upstream
 > documentation. MIT licensed, original copyright retained.
 
+## What this fork adds
+
+**1. English UI** — all bot copy, buttons, and BotFather command descriptions.
+
+**2. Outbound images.** Upstream is inbound-only: images *you* send reach the
+session, but images the session produces never reach your phone. Upstream's
+`contentToText()` filters assistant content down to text blocks, so every
+screenshot a browser/dev tool returns is silently discarded. This fork:
+
+- forwards images found in **tool results** and **assistant messages** to the
+  bound Telegram chat, automatically;
+- sends them as **documents, not photos** — `sendPhoto` re-encodes to JPEG, caps
+  dimensions and drops PNG data, which destroys screenshots and UI text;
+- reads bytes through the host attachment service (`ctx.attachments`), with a
+  fallback to the content-addressed layout for hosts where the service is out of
+  scope;
+- de-duplicates by `attachmentId`, so a screenshot present in both a tool result
+  and the assistant's reply is sent once;
+- caps uploads at 20 MB and reports unreadable/oversized images instead of
+  failing silently.
+
+`TelegramClientLike` gains `sendDocument(chatId, bytes, fileName, caption?)`,
+which POSTs multipart/form-data via undici (proxy-aware), matching the existing
+text path.
+
 ## Install this fork
 
 ```bash

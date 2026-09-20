@@ -99,6 +99,13 @@ export interface TelegramClientLike {
     replyMarkup?: InlineKeyboardMarkup,
   ): Promise<TelegramMessage>
   sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>
+  /** Upload bytes as a document (used to forward screenshots/images outbound). */
+  sendDocument(
+    chatId: number,
+    bytes: Uint8Array,
+    fileName: string,
+    caption?: string,
+  ): Promise<TelegramMessage>
   sendChatAction(chatId: number, action: string): Promise<boolean>
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>
   setMyCommands(commands: TelegramBotCommand[]): Promise<boolean>
@@ -177,6 +184,49 @@ export class TelegramClient implements TelegramClientLike {
 
   async getMe(): Promise<TelegramUser> {
     return this.call<TelegramUser>('getMe')
+  }
+
+  /**
+   * POST one multipart/form-data request (file uploads).
+   *
+   * Deliberately does NOT set Content-Type: the fetch/FormData pair must add its
+   * own boundary. Setting it by hand would break the multipart framing.
+   */
+  private async callMultipart<T>(method: string, form: FormData): Promise<T> {
+    const url = `${this.baseUrl}/bot${this.token}/${method}`
+    try {
+      const response = await this.fetchImpl(url, { method: 'POST', body: form })
+      const json = (await response.json()) as { ok: boolean; result: T; description?: string }
+      if (!json.ok) {
+        throw new Error(json.description ?? 'Telegram API error')
+      }
+      return json.result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(this.redact(message))
+    }
+  }
+
+  /**
+   * Upload bytes as a document.
+   *
+   * Documents (not photos) are the right channel for screenshots: sendPhoto
+   * re-encodes to JPEG, caps dimensions and drops PNG data, which destroys UI
+   * text and any transparency. Documents keep the exact bytes.
+   */
+  async sendDocument(
+    chatId: number,
+    bytes: Uint8Array,
+    fileName: string,
+    caption?: string,
+  ): Promise<TelegramMessage> {
+    const form = new FormData()
+    form.set('chat_id', String(chatId))
+    form.set('document', new Blob([bytes as BlobPart]), fileName)
+    if (caption !== undefined && caption.length > 0) {
+      form.set('caption', caption)
+    }
+    return this.callMultipart<TelegramMessage>('sendDocument', form)
   }
 
   async getUpdates(offset?: number): Promise<TelegramUpdate[]> {

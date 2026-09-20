@@ -79,6 +79,8 @@ export interface TelegramClientLike {
     getUpdates(offset?: number): Promise<TelegramUpdate[]>;
     sendMessage(chatId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup): Promise<TelegramMessage>;
     sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>;
+    /** Upload bytes as a document (used to forward screenshots/images outbound). */
+    sendDocument(chatId: number, bytes: Uint8Array, fileName: string, caption?: string): Promise<TelegramMessage>;
     sendChatAction(chatId: number, action: string): Promise<boolean>;
     answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>;
     setMyCommands(commands: TelegramBotCommand[]): Promise<boolean>;
@@ -96,6 +98,21 @@ export declare class TelegramClient implements TelegramClientLike {
     private redact;
     private call;
     getMe(): Promise<TelegramUser>;
+    /**
+     * POST one multipart/form-data request (file uploads).
+     *
+     * Deliberately does NOT set Content-Type: the fetch/FormData pair must add its
+     * own boundary. Setting it by hand would break the multipart framing.
+     */
+    private callMultipart;
+    /**
+     * Upload bytes as a document.
+     *
+     * Documents (not photos) are the right channel for screenshots: sendPhoto
+     * re-encodes to JPEG, caps dimensions and drops PNG data, which destroys UI
+     * text and any transparency. Documents keep the exact bytes.
+     */
+    sendDocument(chatId: number, bytes: Uint8Array, fileName: string, caption?: string): Promise<TelegramMessage>;
     getUpdates(offset?: number): Promise<TelegramUpdate[]>;
     sendMessage(chatId: number, text: string, parseMode?: string, replyMarkup?: InlineKeyboardMarkup): Promise<TelegramMessage>;
     sendRichMessage(chatId: number, markdown: string): Promise<TelegramMessage>;
