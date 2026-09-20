@@ -1,5 +1,7 @@
 # dsh-telegram-channel
 
+[English](#changes-in-this-fork) · [中文](#中文上游原文) · [Upstream docs](#reference--upstream-documentation)
+
 > **Fork notice — English UI.** This is a fork of
 > [hi-wenw/dsh-telegram-channel](https://github.com/hi-wenw/dsh-telegram-channel)
 > that translates the whole Telegram bot UI from Chinese to English: every
@@ -9,8 +11,10 @@
 > no commit after 2026-08-18 touches i18n). This fork also fixes the session
 > picker, which showed the workspace name instead of the session title for
 > untitled sessions, and resolves real titles via the host `sessionTitle` service.
-> Based on upstream commit `2e9a307`. Everything below is unchanged upstream
-> documentation. MIT licensed, original copyright retained.
+> Based on upstream commit `2e9a307`. This fork's own documentation is in English
+> and comes first; upstream's original Chinese/English docs are kept at the end
+> under [Reference](#reference--upstream-documentation). MIT licensed, original
+> copyright retained.
 
 ## Changes in this fork
 
@@ -142,25 +146,77 @@ Notes that cost time if you discover them the hard way:
 | Menu still in the old language | `setMyCommands` runs at boot; restart `dsh web`. |
 | `ERR_PNPM_IGNORED_BUILDS` | Approve the git specifier in the profile's `pnpm-workspace.yaml`. |
 
-## Upstream documentation (unchanged)
+## Usage
 
-Everything below is upstream's own documentation, kept verbatim for reference. It
-is **Chinese-first**, and its install commands target `github:hi-wenw/...` — see
-[Install this fork](#install-this-fork) above.
+1. Start `dsh web` on the desktop.
+2. In Telegram: `/start` → `/sessions` → pick a workspace → pick a session →
+   attach.
+3. Send text, or an image, and it enters that session. Web and phone share one
+   trajectory.
+4. `/model` switches the bound session's model (takes effect the next turn).
+5. To pick up context, tap **View last conversation** or send `/last`.
 
-[English](#english) · [中文](#中文)
+### Commands
+
+| Command | What it does |
+|---|---|
+| `/sessions` | Lists workspaces, then that workspace's sessions (Web-aligned; archived, blank and subagent sessions excluded). Attaching a cold session resumes it. |
+| `/last` | Shows the bound session's **previous Q/A**. The **View last conversation** button does the same. |
+| `/model` | Switches the bound session's model. |
+| `/status` | Session status: bound session, session ID, workspace, model, reasoning effort, context, avg first token, output rate, input/output tokens — same source as the Web footer. |
+| `/compact` | Compacts the bound session's history to shorten context. The session must be idle; messages queue during compaction. |
+| `/rich` | Rendering mode: `on` = rich text (needs a recent client), `off` = HTML compatible (default). Persists per chat. |
+| `/unbind` | Detaches the phone. Does **not** close the desktop session. |
+| `/stop` | Aborts the currently running task. |
+| `/mission` | Shows the task list and progress. |
+| `/new` | Starts a new conversation in the current workspace and attaches. |
+| `/cancel` | Closes TG-side answering/approval (the Web side can still answer). |
+| `/help` | Shows help. |
+
+### Configuration
+
+| Key / environment variable | Meaning |
+|---|---|
+| `token` / `DSH_TELEGRAM_TOKEN` | Bot token. |
+| `allowedUserIds` / `DSH_TELEGRAM_ALLOWED_USER_IDS` | Allowlist. **Both empty means nobody can use the bot.** Multiple IDs may be comma- or space-separated; non-numeric entries are silently dropped. |
+| `allowAllUsers` | `true` for debugging only. |
+| `maxMessageLength` | Default `4096`. |
+| `pollingTimeoutSec` | Default `30`. |
+| `rendering` | `html` (default, works on every client) or `rich` (native Rich Message). |
+
+If the host reaches Telegram through an HTTP(S) proxy, the plugin uses it
+automatically — no need to set `NODE_USE_ENV_PROXY`.
+
+To change the allowlist in YAML, **override by id** — never `insert` a duplicate
+id:
+
+```yaml
+- id: dsh-telegram-channel
+  config:
+    token: ""
+    allowedUserIds: [123456789]
+```
+
+See `examples/telegram-agent/cordis.patch.example.yml`.
+
+## Reference — upstream documentation
+
+The fork documentation above is authoritative. Below is upstream's own
+documentation, kept for reference: the Chinese original first, then upstream's
+English translation. Its install commands target `github:hi-wenw/...` — see
+[Install this fork](#install-this-fork).
 
 ![dsh-telegram-channel flow: Desktop → Phone attach → Same trajectory](docs/screenshots/hero-flow.png)
 
 Telegram **手机遥控器** for DeepSeek Harness：附着本机正在跑的 Web 会话，与电脑 **同轨迹、双向可见**（Codex-style）。
 
-**发现：** [dsh-plugin topic](https://github.com/topics/dsh-plugin) · 安装：`dsh plugin --profile web add github:hi-wenw/dsh-telegram-channel`
+**来源：** [dsh-plugin topic](https://github.com/topics/dsh-plugin) · 原始安装：`dsh plugin --profile web add github:hi-wenw/dsh-telegram-channel`
 
 **Keywords：** Telegram · Bot · Mobile · Remote · DSH · Cordis · dsh-plugin · sessions · bind
 
 ---
 
-## 中文
+## 中文（上游原文）
 
 ### 使用前需要什么
 
