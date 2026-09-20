@@ -104,6 +104,20 @@ cd ~/.dsh/profiles/web && pnpm install
 pnpm uses `nodeLinker: hoisted`, which **copies** the build rather than linking
 it, so `pnpm install` must be re-run after any change for it to take effect.
 
+> **Gotcha: `pnpm install` will lie to you after a rebuild.** For a `file:` or
+> `github:` dependency pnpm can report `Already up to date` and skip the copy even
+> though `lib/` changed on disk, so your rebuild silently never reaches the
+> profile. If a code change appears to have no effect, force the copy:
+>
+> ```bash
+> rm -rf ~/.dsh/profiles/web/node_modules/dsh-telegram-channel
+> cd ~/.dsh/profiles/web && pnpm install
+> ```
+>
+> Confirm with `grep <your new symbol> ~/.dsh/profiles/web/node_modules/dsh-telegram-channel/lib/*.js`
+> before concluding the code is wrong. This cost real debugging time: a change
+> appeared broken when it had simply never been installed.
+
 ## Develop, build and test
 
 The repo commits `lib/` so `github:` installs work without a build step, so
