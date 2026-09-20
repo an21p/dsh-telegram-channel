@@ -32,13 +32,13 @@ test('parse /rich with optional mode argument', () => {
   assert.equal(parseCommand('/setting html').type === 'rich' && parseCommand('/setting html').arg, 'html')
 })
 
-test('Chinese copy mentions sessions and bind', () => {
-  assert.ok(MSG.DENIED.includes('权限') || MSG.DENIED.includes('授权'))
+test('copy mentions sessions and bind', () => {
+  assert.ok(MSG.DENIED.includes('Not authorized') || MSG.DENIED.includes('authorized'))
   assert.ok(MSG.HELP.includes('/sessions'))
   assert.ok(MSG.HELP.includes('/last'))
   assert.ok(MSG.HELP.includes('/model'))
   assert.ok(MSG.NEED_BIND.includes('/sessions'))
-  assert.ok(MSG.WELCOME.includes('Web') || MSG.WELCOME.includes('遥控器'))
+  assert.ok(MSG.WELCOME.includes('Web') || MSG.WELCOME.includes('remote'))
 })
 
 test('parse /compact', () => {

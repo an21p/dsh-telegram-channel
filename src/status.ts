@@ -56,11 +56,11 @@ export interface StatusInfo {
 }
 
 const EFFORT_NAMES: Record<string, string> = {
-  off: '关闭（off）',
-  low: '低（low）',
-  medium: '中（medium）',
-  high: '高（high）',
-  max: '最高（max）',
+  off: 'off',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  max: 'max',
 }
 
 export function effortLabel(effort?: string): string | undefined {
@@ -161,23 +161,23 @@ export function cacheHitPercent(runtime: StatusRuntime): string | null {
  * 一组内同 Web 底部：无数据的子项整组省略。
  */
 export function formatStatusText(info: StatusInfo): string {
-  const lines: string[] = ['会话状态']
+  const lines: string[] = ['Session status']
 
-  lines.push(`会话：${info.label || info.sessionId}`)
-  lines.push(`会话 ID：${info.sessionId}`)
+  lines.push(`Session: ${info.label || info.sessionId}`)
+  lines.push(`Session ID: ${info.sessionId}`)
 
   const ws = info.workspace
   if (ws?.title || ws?.path) {
     const primary = ws.title && ws.path
-      ? `${ws.title}（${ws.path}）`
+      ? `${ws.title} (${ws.path})`
       : (ws.title ?? ws.path ?? '')
-    lines.push(`工作区：${primary}`)
+    lines.push(`Workspace: ${primary}`)
   }
 
   const model = info.model
   if (model?.provider && model?.model) {
-    lines.push(`模型：${model.provider}/${model.model}`)
-    lines.push(`思考强度：${effortLabel(model.reasoningEffort) ?? '默认（未指定）'}`)
+    lines.push(`Model: ${model.provider}/${model.model}`)
+    lines.push(`Reasoning effort: ${effortLabel(model.reasoningEffort) ?? 'default (unspecified)'}`)
   }
 
   const runtime = info.runtime
@@ -186,21 +186,21 @@ export function formatStatusText(info: StatusInfo): string {
     const window = runtime.contextWindow
     if (contextUsed !== undefined && window !== undefined && window > 0) {
       const percent = Math.min(100, Math.round(contextUsed / window * 100))
-      lines.push(`上下文：${formatTokens(contextUsed)} / ${formatTokens(window)} tokens（${percent}%）`)
+      lines.push(`Context: ${formatTokens(contextUsed)} / ${formatTokens(window)} tokens (${percent}%)`)
     } else if (contextUsed !== undefined) {
-      lines.push(`上下文：${formatTokens(contextUsed)} tokens（窗口大小未知）`)
+      lines.push(`Context: ${formatTokens(contextUsed)} tokens (window size unknown)`)
     }
 
     const stats: string[] = []
     if ((runtime.steps ?? 0) > 0) {
-      stats.push(`${runtime.turns ?? 0} 轮 · ${runtime.steps ?? 0} 步`)
+      stats.push(`${runtime.turns ?? 0} turns · ${runtime.steps ?? 0} steps`)
       const durations: string[] = []
       if ((runtime.llmMs ?? 0) > 0) durations.push(`LLM ${formatDuration(runtime.llmMs!)}`)
-      if ((runtime.toolMs ?? 0) > 0) durations.push(`工具调用 ${formatDuration(runtime.toolMs!)}`)
+      if ((runtime.toolMs ?? 0) > 0) durations.push(`tool calls ${formatDuration(runtime.toolMs!)}`)
       if (durations.length > 0) stats.push(durations.join(' · '))
       const speeds: string[] = []
       if ((runtime.ttftSteps ?? 0) > 0) {
-        speeds.push(`首 token 平均 ${formatDuration((runtime.ttftMs ?? 0) / runtime.ttftSteps!)}`)
+        speeds.push(`avg first token ${formatDuration((runtime.ttftMs ?? 0) / runtime.ttftSteps!)}`)
       }
       if ((runtime.decodeMs ?? 0) > 0) {
         speeds.push(`${formatTokensPerSecond((runtime.decodeTokens ?? 0) / (runtime.decodeMs! / 1_000))} tok/s`)
@@ -210,21 +210,21 @@ export function formatStatusText(info: StatusInfo): string {
     if (billedInputTokens(runtime) > 0 || (runtime.outputTokens ?? 0) > 0) {
       const hit = cacheHitPercent(runtime)
       const billing = [
-        hit === null ? '' : `缓存命中 ${hit}%`,
-        `输入 ${formatTokens(billedInputTokens(runtime))} tok · 输出 ${formatTokens(runtime.outputTokens ?? 0)} tok`,
+        hit === null ? '' : `cache hit ${hit}%`,
+        `input ${formatTokens(billedInputTokens(runtime))} tok · output ${formatTokens(runtime.outputTokens ?? 0)} tok`,
       ].filter(Boolean).join(' · ')
       stats.push(billing)
     }
     if (stats.length > 0) {
       lines.push('')
-      lines.push('统计（与 Web 底部一致）')
+      lines.push('Statistics (same as the Web footer)')
       lines.push(...stats.map((s) => `  ${s}`))
     }
   }
 
   if (info.live === false) {
     lines.push('')
-    lines.push('（会话当前不在内存中；直接发消息会自动 resume。）')
+    lines.push('(Session is not in memory right now; sending a message resumes it automatically.)')
   }
   return lines.join('\n')
 }

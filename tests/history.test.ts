@@ -10,29 +10,29 @@ test('extractLastTurn pairs latest human user with following assistant', () => {
     },
     {
       type: 'user/message',
-      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第一问' }] },
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'first question' }] },
     },
     {
       type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: '第一答' }] } },
+      data: { message: { content: [{ type: 'text', text: 'first answer' }] } },
     },
     {
       type: 'user/message',
-      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第二问' }] },
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'second question' }] },
     },
     {
       type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: '第二答' }] } },
+      data: { message: { content: [{ type: 'text', text: 'second answer' }] } },
     },
   ])
-  assert.equal(turn.userText, '第二问')
-  assert.equal(turn.assistantText, '第二答')
+  assert.equal(turn.userText, 'second question')
+  assert.equal(turn.assistantText, 'second answer')
 })
 
 test('formatLastTurn renders sections', () => {
   const text = formatLastTurn({ userText: 'hi', assistantText: 'hello' })
-  assert.match(text, /【用户】/)
+  assert.match(text, /\[User\]/)
   assert.match(text, /hi/)
-  assert.match(text, /【助手】/)
+  assert.match(text, /\[Assistant\]/)
   assert.match(text, /hello/)
 })

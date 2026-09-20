@@ -6,7 +6,7 @@ import {
 } from '../src/rich-format.ts'
 
 test('splitRichMarkdown keeps small markdown as one chunk', () => {
-  const markdown = '# 标题\n\n- a\n- b\n\n```js\nx\n```\n'
+  const markdown = '# Title\n\n- a\n- b\n\n```js\nx\n```\n'
   assert.deepEqual(splitRichMarkdown(markdown), [markdown])
 })
 

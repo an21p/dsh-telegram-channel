@@ -1,5 +1,17 @@
 # dsh-telegram-channel
 
+> **Fork notice — English UI.** This is a fork of
+> [hi-wenw/dsh-telegram-channel](https://github.com/hi-wenw/dsh-telegram-channel)
+> that translates the whole Telegram bot UI from Chinese to English: every
+> user-facing string, button label, and BotFather command description. Upstream
+> hardcodes the bot copy in Chinese — upstream issue #4 was closed promising a
+> `locale` option in "v0.4.0" that was never released (master is still 0.3.5, and
+> no commit after 2026-08-18 touches i18n). This fork also fixes the session
+> picker, which showed the workspace name instead of the session title for
+> untitled sessions, and resolves real titles via the host `sessionTitle` service.
+> Based on upstream commit `2e9a307`. Everything below is unchanged upstream
+> documentation. MIT licensed, original copyright retained.
+
 [English](#english) · [中文](#中文)
 
 ![dsh-telegram-channel flow: Desktop → Phone attach → Same trajectory](docs/screenshots/hero-flow.png)

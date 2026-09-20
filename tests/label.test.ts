@@ -26,14 +26,14 @@ test('readSessionTitle uses service, then events', () => {
     header: { cwd: '/w' },
     events: [
       { type: 'user/message', data: {} },
-      { type: 'session/title', data: { title: '  修复登录  ' } },
+      { type: 'session/title', data: { title: '  Fix login  ' } },
     ],
   }
-  assert.equal(readSessionTitle(undefined, session), '修复登录')
+  assert.equal(readSessionTitle(undefined, session), 'Fix login')
   const ctx = {
-    sessionTitle: { get: () => ({ title: '来自服务' }) },
+    sessionTitle: { get: () => ({ title: 'from service' }) },
   }
-  assert.equal(readSessionTitle(ctx as any, session), '来自服务')
+  assert.equal(readSessionTitle(ctx as any, session), 'from service')
 })
 
 test('describeAgent builds title + workspace + id tail', () => {
@@ -41,20 +41,20 @@ test('describeAgent builds title + workspace + id tail', () => {
     id: SessionId('0123456789abcdef-live'),
     session: {
       header: { cwd: 'D:/gitData/my-app' },
-      events: [{ type: 'session/title', data: { title: '重构支付' } }],
+      events: [{ type: 'session/title', data: { title: 'Refactor payments' } }],
     },
   }
   const parts = describeAgent(agent as any, 0)
-  assert.equal(parts.title, '重构支付')
+  assert.equal(parts.title, 'Refactor payments')
   assert.equal(parts.workspace, 'my-app')
-  assert.match(detailLines(parts), /重构支付/)
+  assert.match(detailLines(parts), /Refactor payments/)
   assert.match(detailLines(parts), /D:\/gitData\/my-app/)
-  assert.match(buttonLabel(parts), /^1\. 重构支付/)
-  assert.match(displayLabel(parts), /重构支付 · my-app/)
+  assert.match(buttonLabel(parts), /^1\. Refactor payments/)
+  assert.match(displayLabel(parts), /Refactor payments · …9abcdef-live/)
 })
 
 test('buttonLabel stays within 64 chars', () => {
-  const longTitle = '啊'.repeat(80)
+  const longTitle = 'a'.repeat(80)
   const label = buttonLabel({
     index: 0,
     title: longTitle,

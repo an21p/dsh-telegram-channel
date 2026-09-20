@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveApiProxy } from './apiproxy.js'
-import { describeAgent, workspaceName } from './label.js'
+import { describeAgent, readSessionTitle, workspaceName } from './label.js'
 
 export interface WorkspaceRow {
   id: string
@@ -47,22 +47,67 @@ function unwrap<T>(res: unknown): T | undefined {
   return undefined
 }
 
+/** Explicit marker for a session that has no generated title yet. */
+export const UNTITLED_SESSION = 'untitled session'
+
+/** Short, stable, human-scannable id tail (last 12 chars, prefixed with …). */
+export function sessionIdTail(sessionId: string): string {
+  const id = String(sessionId)
+  return id.length > 12 ? `…${id.slice(-12)}` : id
+}
+
+/**
+ * Resolve a session's display title.
+ *
+ * Deliberately NEVER falls back to the workspace name: a workspace usually holds
+ * several sessions, so a workspace-name fallback makes every untitled session in
+ * that workspace render identically. Prefer the host's generated title (title
+ * projection, or a session/title event), and otherwise show a short id tail so
+ * sessions stay distinguishable.
+ */
 function titleOf(summary: {
   sessionId: string
   cwd?: string
   projections?: { values?: { title?: string | null } }
+  events?: ReadonlyArray<{ type?: string; data?: { title?: string } }>
 }): string {
-  const t = summary.projections?.values?.title
-  if (typeof t === 'string' && t.trim()) return t.trim()
-  const ws = workspaceName(summary.cwd)
-  if (ws) return ws
-  const id = String(summary.sessionId)
-  return id.length > 12 ? `…${id.slice(-12)}` : id
+  const projected = summary.projections?.values?.title
+  if (typeof projected === 'string' && projected.trim()) return projected.trim()
+
+  const events = summary.events
+  if (Array.isArray(events)) {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i]
+      if (ev?.type === 'session/title' && typeof ev.data?.title === 'string') {
+        const t = ev.data.title.trim()
+        if (t) return t
+      }
+    }
+  }
+
+  return sessionIdTail(summary.sessionId)
 }
 
-/** Load workspaces + sessions aligned with Web UI (via apiProxy when available). */
-export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undefined> {
+/**
+ * Load workspaces + sessions aligned with Web UI (via apiProxy when available).
+ *
+ * `liveAgents` is consulted for real titles: the sessions.list projection is a
+ * zero-I/O cache read that yields undefined until a session has a durable
+ * checkpoint, so a freshly booted host reports no title for most sessions and
+ * the picker would fall back to id tails. The sessionTitle service derives the
+ * title from the session log, so prefer it whenever the agent is live.
+ */
+export async function loadCatalog(
+  ctx: Context,
+  liveAgents: readonly Agent[] = [],
+): Promise<CatalogSnapshot | undefined> {
   const api = resolveApiProxy(ctx)
+
+  const runtimeTitles = new Map<string, string>()
+  for (const agent of liveAgents) {
+    const title = readSessionTitle(ctx, agent.session)
+    if (title) runtimeTitles.set(String(agent.id), title)
+  }
 
   const wsPromise = rpcCall(api?.workspace?.list, {})
   const sessPromise = rpcCall(api?.sessions?.list, {})
@@ -93,7 +138,9 @@ export async function loadCatalog(ctx: Context): Promise<CatalogSnapshot | undef
     const sessionId = String(item.sessionId)
     sessionsById.set(sessionId, {
       sessionId,
-      title: titleOf({ ...item, sessionId }),
+      // Real title (sessionTitle service) wins over the cache-derived
+      // projection; an id tail is the last resort, never the workspace name.
+      title: runtimeTitles.get(sessionId) ?? titleOf({ ...item, sessionId }),
       cwd: item.cwd,
       blank: Boolean(item.blank),
       running: Boolean(item.running),
@@ -150,7 +197,10 @@ export function catalogFromLiveAgents(agents: Agent[], ctx?: Context): CatalogSn
     const cwd = parts.cwd ?? '(unknown)'
     sessionsById.set(sessionId, {
       sessionId,
-      title: parts.title || parts.workspace || sessionId,
+      // parts.title is the host's real session title (sessionTitle service /
+      // title projection). Never substitute the workspace name here — that makes
+      // every untitled session in a workspace look the same.
+      title: parts.title || sessionIdTail(sessionId),
       cwd: parts.cwd,
       blank: false,
       running: true,
