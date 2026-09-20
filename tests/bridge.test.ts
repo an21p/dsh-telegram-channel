@@ -724,7 +724,11 @@ test('default rendering is HTML compat (no rich messages unless /rich on)', asyn
     assert.ok(sent.some((m) => m.text.includes('default-mode reply')))
     await bridge.stop()
   } finally {
-    delete process.env.DSH_TELEGRAM_BINDINGS_FILE
+    // NOTE: never delete DSH_TELEGRAM_BINDINGS_FILE here. Restoring it to
+    // undefined makes the NEXT saveBindings() fall back to the real
+    // ~/.dsh/telegram-channel-bindings.json and overwrite the operator's
+    // bindings — destructive, because the plugin writes in place with no
+    // temp-and-rename. tests/setup-env.ts owns the global override.
     rmSync(bindingsFile, { force: true })
   }
 })
@@ -774,7 +778,11 @@ test('/rich on routes replies to sendRichMessage; /rich off reverts to HTML; sta
 
     await bridge.stop()
   } finally {
-    delete process.env.DSH_TELEGRAM_BINDINGS_FILE
+    // NOTE: never delete DSH_TELEGRAM_BINDINGS_FILE here. Restoring it to
+    // undefined makes the NEXT saveBindings() fall back to the real
+    // ~/.dsh/telegram-channel-bindings.json and overwrite the operator's
+    // bindings — destructive, because the plugin writes in place with no
+    // temp-and-rename. tests/setup-env.ts owns the global override.
     rmSync(bindingsFile, { force: true })
   }
 })
