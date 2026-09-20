@@ -12,6 +12,22 @@
 > Based on upstream commit `2e9a307`. Everything below is unchanged upstream
 > documentation. MIT licensed, original copyright retained.
 
+## Install this fork
+
+```bash
+export DSH_TELEGRAM_TOKEN='<BotFather token>'
+export DSH_TELEGRAM_ALLOWED_USER_IDS='<your numeric id>'
+dsh plugin --profile web add github:an21p/dsh-telegram-channel
+dsh web
+```
+
+pnpm may refuse the build script for a git install; if you see
+`ERR_PNPM_IGNORED_BUILDS`, approve the git specifier in
+`~/.dsh/profiles/web/pnpm-workspace.yaml` and reinstall.
+
+No configuration option is needed for the language — this fork emits English
+only.
+
 [English](#english) · [中文](#中文)
 
 ![dsh-telegram-channel flow: Desktop → Phone attach → Same trajectory](docs/screenshots/hero-flow.png)
