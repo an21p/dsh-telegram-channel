@@ -12,9 +12,12 @@
 > Based on upstream commit `2e9a307`. Everything below is unchanged upstream
 > documentation. MIT licensed, original copyright retained.
 
-## What this fork adds
+## Changes in this fork
 
-**1. English UI** — all bot copy, buttons, and BotFather command descriptions.
+**1. English UI.** All bot copy, button labels, workspace/session picker text,
+`/status` output, `/last` blocks, and the 13 BotFather command descriptions are
+English. Upstream hardcodes them in Chinese. The `MSG` table in
+`src/commands.ts` is the single source for most of it.
 
 **2. Outbound images.** Upstream is inbound-only: images *you* send reach the
 session, but images the session produces never reach your phone. Upstream's
@@ -37,7 +40,37 @@ screenshot a browser/dev tool returns is silently discarded. This fork:
 which POSTs multipart/form-data via undici (proxy-aware), matching the existing
 text path.
 
+**3. Session picker and titles.**
+
+- The picker showed the **workspace name** for a session with no title, so every
+  untitled session in a workspace rendered identically (`1. music_prep`,
+  `2. music_prep`, …). It now falls back to a short id tail and never uses the
+  workspace name.
+- Titles are resolved through the host `sessionTitle` service. The host's
+  `sessions.list` omits the title projection on a freshly booted process —
+  `projectionsFor()` performs a zero-I/O read of a projection-cache record that
+  only exists after a durable checkpoint — so titles were unavailable and every
+  session rendered as an id tail.
+- `displayLabel` no longer appends a redundant workspace to a titled session, and
+  no longer doubles the ellipsis (`music_prep · ……X9M2P7V3`).
+
+**4. Smaller fixes.**
+
+- `detailLines` emitted a fullwidth colon (`ID：`).
+- `IMAGE_MODEL_UNSUPPORTED` now names the `/model` command, since the message is
+  shown when a text-only model rejects an image.
+
+**Not changed:** `format.ts` keeps a fullwidth `。` as a sentence boundary when
+chunking long messages. That is line-breaking for CJK text, not leftover UI copy.
+
 ## Install this fork
+
+> **Every install command in the upstream documentation below targets
+> `github:hi-wenw/dsh-telegram-channel` (upstream).** To install *this* fork,
+> substitute `github:an21p/dsh-telegram-channel`. The `scripts/install.ps1` and
+> `scripts/install.sh` one-liners below fetch from the upstream raw URL and are
+> left as upstream wrote them; the explicit commands above are the supported
+> path for this fork.
 
 ```bash
 export DSH_TELEGRAM_TOKEN='<BotFather token>'
@@ -52,6 +85,68 @@ pnpm may refuse the build script for a git install; if you see
 
 No configuration option is needed for the language — this fork emits English
 only.
+
+### Upgrading from upstream
+
+Because this fork's `package.json` still declares `dsh-telegram-channel`, it
+replaces upstream in place. Repoint the profile dependency and reinstall:
+
+```bash
+# ~/.dsh/profiles/web/package.json
+#   "dsh-telegram-channel": "github:an21p/dsh-telegram-channel"
+cd ~/.dsh/profiles/web && pnpm install
+```
+
+pnpm uses `nodeLinker: hoisted`, which **copies** the build rather than linking
+it, so `pnpm install` must be re-run after any change for it to take effect.
+
+## Develop, build and test
+
+The repo commits `lib/` so `github:` installs work without a build step, so
+**rebuild after editing `src/`** and reinstall for the change to reach a running
+profile.
+
+```bash
+pnpm install --store-dir <a writable store>   # dev deps: typescript, tsx
+pnpm run build        # tsc -p tsconfig.json  -> emits lib/
+pnpm run typecheck    # tsc --noEmit
+pnpm test             # node --import tsx --test tests/**/*.test.ts
+```
+
+Notes that cost time if you discover them the hard way:
+
+- `tsc` reports **8 type errors inherited from upstream** (three `implicitly has
+  an 'any' type`, three `Property 'data' does not exist on type 'never'`, two
+  comparisons with no overlap). `noEmitOnError` is not set, so `lib/` is still
+  emitted correctly. The count is the same on pristine upstream — treat 8 as the
+  baseline, not as breakage.
+- Building needs the peer type packages on the module path. If every
+  `@deepseek-ai/*` or `node:*` import fails to resolve, link the profile's
+  installed copies into `node_modules` rather than reinstalling from the registry
+  (some peers, e.g. `@deepseek-ai/dsh-type-meta`, are not published to npm).
+- Two environment variables isolate state in tests and harnesses:
+  `DSH_TELEGRAM_BINDINGS_FILE` overrides the bindings path (upstream's own tests
+  set it) and `DSH_HOME` relocates the profile home. Without
+  `DSH_TELEGRAM_BINDINGS_FILE`, any code that binds a chat **overwrites the real
+  `~/.dsh/telegram-channel-bindings.json`** — the plugin writes in place with no
+  temp-and-rename, so the previous contents are not recoverable.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `/model` unavailable | Needs `dsh web` (apiProxy). Attach a session with `/sessions` first. |
+| Images rejected | The bound session's model is text-only. `/model` → pick a multimodal model. |
+| No images forwarded | The session produced none, or the attachment bytes are unreadable — the bot reports the latter explicitly. |
+| Bot silent, no reply | Check the token and that `dsh web` was restarted after the plugin changed. |
+| Menu still in the old language | `setMyCommands` runs at boot; restart `dsh web`. |
+| `ERR_PNPM_IGNORED_BUILDS` | Approve the git specifier in the profile's `pnpm-workspace.yaml`. |
+
+## Upstream documentation (unchanged)
+
+Everything below is upstream's own documentation, kept verbatim for reference. It
+is **Chinese-first**, and its install commands target `github:hi-wenw/...` — see
+[Install this fork](#install-this-fork) above.
 
 [English](#english) · [中文](#中文)
 
